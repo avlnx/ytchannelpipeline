@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from pprint import pprint
-from typing import List
+from typing import List, TypeVar, Callable, Any
 import argparse
+from functools import wraps
 
 import googleapiclient.discovery
 import googleapiclient.errors
@@ -13,19 +14,18 @@ from result import Ok, Err
 
 
 from my_types import (
-    PlaylistId,
+    UploadsPlaylistIdResult,
     ChannelId,
     YoutubeClientGetter,
-    ChannelResult,
-    PlaylistIdResult,
-    PlaylistItemsResult,
-    VideosResult,
     YoutubeClientResult,
     Channel,
+    ApiResponseResult,
+    ApiResponse,
+    ApiResult,
 )
 
 
-MAX_RESULTS = 2
+MAX_RESULTS = 1
 
 
 def build_youtube_client_getter(developer_key: str) -> YoutubeClientGetter:
@@ -66,9 +66,25 @@ def check_youtube_client_getter(youtube: YoutubeClientGetter):
         raise ValueError(client.unwrap_err())
 
 
-async def get_channel(
-    youtube: YoutubeClientGetter, channel_id: ChannelId
-) -> ChannelResult:
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+# decorator that turns ApiResults into ApiResponseResults
+def api_response(func: F) -> F:
+    @wraps(func)
+    async def as_api_response_result(*args, **kwargs) -> ApiResponseResult:
+        result = await func(*args, **kwargs)
+        if isinstance(result, Err):
+            return result
+
+        data = result.unwrap()
+        return Ok(ApiResponse(kind=data["kind"], data=data))
+
+    return as_api_response_result
+
+
+@api_response
+async def get_channel(youtube: YoutubeClientGetter, channel_id: ChannelId) -> ApiResult:
     client = youtube()
     if isinstance(client, Err):
         return Err(client.unwrap_err())
@@ -97,25 +113,10 @@ async def get_channel(
     return Ok(result)
 
 
-def parse_uploads_playlist_from(channel: ChannelResult) -> PlaylistIdResult:
-    if isinstance(channel, Err):
-        return Err(channel.unwrap_err())
-
-    try:
-        return Ok(
-            PlaylistId(
-                channel.unwrap()["items"][0]["contentDetails"]["relatedPlaylists"][
-                    "uploads"
-                ]
-            )
-        )
-    except (KeyError, IndexError, ValueError) as err:
-        return Err(f"[parse_uploads_playlist_from] {str(err)}")
-
-
+@api_response
 async def get_playlist_items_with(
-    youtube: YoutubeClientGetter, playlist_id: PlaylistIdResult
-) -> PlaylistItemsResult:
+    youtube: YoutubeClientGetter, playlist_id: UploadsPlaylistIdResult
+) -> ApiResult:
     if isinstance(playlist_id, Err):
         return Err(playlist_id.unwrap_err())
 
@@ -143,78 +144,78 @@ async def get_playlist_items_with(
     return Ok(result)
 
 
-async def get_videos_from(
-    youtube: YoutubeClientGetter, playlist_items: PlaylistItemsResult
-) -> VideosResult:
-    if isinstance(playlist_items, Err):
-        return Err(playlist_items.unwrap_err())
+# @api_response
+# async def get_videos_from(
+#     youtube: YoutubeClientGetter, playlist_items: PlaylistItemsResult
+# ) -> ApiResult:
+#     if isinstance(playlist_items, Err):
+#         return Err(playlist_items.unwrap_err())
+#
+#     client = youtube()
+#     if isinstance(client, Err):
+#         return Err(client.unwrap_err())
+#
+#     try:
+#         video_ids = ",".join(
+#             [v["contentDetails"]["videoId"] for v in playlist_items.unwrap()["items"]]
+#         )
+#     except (KeyError, IndexError, ValueError) as err:
+#         return Err(f"[get_videos_from] {str(err)}")
+#
+#     request = (
+#         client.unwrap()
+#         .videos()
+#         .list(
+#             part="snippet,contentDetails,status,id",
+#             id=video_ids,
+#             maxResults=MAX_RESULTS,
+#         )
+#     )
+#
+#     try:
+#         result = request.execute()
+#     except googleapiclient.errors.Error as err:
+#         return Err(f"[get_videos_from] {str(err)}")
+#     except Exception as err:
+#         return Err(f"[get_videos_from] {str(err)}")
+#
+#     return Ok(result)
 
-    client = youtube()
-    if isinstance(client, Err):
-        return Err(client.unwrap_err())
 
-    try:
-        video_ids = ",".join(
-            [v["contentDetails"]["videoId"] for v in playlist_items.unwrap()["items"]]
-        )
-    except (KeyError, IndexError, ValueError) as err:
-        return Err(f"[get_videos_from] {str(err)}")
-
-    request = (
-        client.unwrap()
-        .videos()
-        .list(
-            part="snippet,contentDetails,status,id",
-            id=video_ids,
-            maxResults=MAX_RESULTS,
-        )
-    )
-
-    try:
-        result = request.execute()
-    except googleapiclient.errors.Error as err:
-        return Err(f"[get_videos_from] {str(err)}")
-    except Exception as err:
-        return Err(f"[get_videos_from] {str(err)}")
-
-    return Ok(result)
-
-
-async def get_videos_for_channel(
-    youtube: YoutubeClientGetter, channel: Channel
-) -> VideosResult:
-    channel = await get_channel(youtube, channel.id)
-    playlist_id = parse_uploads_playlist_from(channel)
-    playlist_items = await get_playlist_items_with(youtube, playlist_id)
-    videos = await get_videos_from(youtube, playlist_items)
-    return videos
+# @api_response
+# async def get_videos_for_channel(
+#     youtube: YoutubeClientGetter, channel: Channel
+# ) -> ApiResult:
+#     channel = await get_channel(youtube, channel.id_)
+#     playlist_id = parse_uploads_playlist_from(channel)
+#     playlist_items = await get_playlist_items_with(youtube, playlist_id)
+#     videos = await get_videos_from(youtube, playlist_items)
+#     return videos
 
 
 async def process(youtube: YoutubeClientGetter, channel: Channel):
-    videos = await get_videos_for_channel(youtube, channel)
 
-    if isinstance(videos, Ok):
-        print(
-            f"\n\nSuccess!\n"
-            f"Found {len(videos.value['items'])} videos from {channel.name}:\n"
-        )
-        pprint([(v["id"], v["snippet"]["title"]) for v in videos.value["items"]])
-    else:
-        print(f"\n\n[{channel.name}] Failed!\n{videos.value}")
+    get_channel_response: ApiResponseResult = await get_channel(youtube, channel.id_)
+
+    # populate Channel fields that are parseable from the response above
+    channel.ingest(get_channel_response)
+
+    get_playlist_items_response: ApiResponseResult = await get_playlist_items_with(
+        youtube, channel.uploads_playlist_id.result
+    )
+
+    # TODO: populate Channel fields that are parseable from the response above
+    channel.ingest(get_playlist_items_response)
+
+    pprint(channel)
 
 
 async def main(developer_key: str):
-    # TODO: make all pipeline functions receive a ChannelResult which encapsulates a Channel object
-    #   This object should only have Result fields (Ok(value) or Err(str)) which need to be
-    #   initialized to Err('Not loaded'). This way it's easy to add a new field.
-    #   and new pipeline functions won't erase any data we got. We assume some data is better than
-    #   no data. Though some functions should actually invalidate the whole thing (like if the
-    #   channel is not found)
 
     channels: List[Channel] = [
-        Channel(id=ChannelId("UC8butISFwT-Wl7EV0hUK0BQ"), name="Free Code Camp"),
-        Channel(id=ChannelId("UCsUalyRg43M8D60mtHe6YcA"), name="Honeypot IO"),
-        Channel(id=ChannelId("UC_x5XG1OV2P6uZZ5FSM9Ttw"), name="Google Developers"),
+        Channel(id_=ChannelId("UC8butISFwT-Wl7EV0hUK0BQ")),  # Freecodecamp.org
+        Channel(id_=ChannelId("UCsUalyRg43M8D60mtHe6YcA")),  # Honeypot IO
+        Channel(id_=ChannelId("UC_x5XG1OV2P6uZZ5FSM9Ttw")),  # Google Developers
     ]
 
     youtube: YoutubeClientGetter = build_youtube_client_getter(developer_key)

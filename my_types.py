@@ -1,6 +1,7 @@
-from typing import Callable, Dict, TypeVar
+from typing import Callable, Dict, TypeVar, List
 from datetime import datetime
 import dateutil.parser
+import logging
 
 from result import Result, Err, Ok
 from typing_extensions import NewType, Protocol, TypedDict, Literal
@@ -55,7 +56,7 @@ class NoOpParser:
 TitleResult = Result[str, str]
 
 
-class YoutubeChannelListTitleParser:
+class ChannelListTitleParser:
     @staticmethod
     def parse(_: TitleResult, api_response: ApiResponse) -> TitleResult:
         try:
@@ -69,13 +70,13 @@ class YoutubeChannelListTitleParser:
 class TitlePipelineField:
     def __init__(self):
         self.result: TitleResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": YoutubeChannelListTitleParser}
+        self.parsers = {"youtube#channelListResponse": ChannelListTitleParser}
 
 
 DescriptionResult = Result[str, str]
 
 
-class YoutubeChannelListDescriptionParser:
+class ChannelListDescriptionParser:
     @staticmethod
     def parse(_: DescriptionResult, api_response: ApiResponse) -> DescriptionResult:
         try:
@@ -89,15 +90,13 @@ class YoutubeChannelListDescriptionParser:
 class DescriptionPipelineField:
     def __init__(self):
         self.result: DescriptionResult = Err("Not loaded yet")
-        self.parsers = {
-            "youtube#channelListResponse": YoutubeChannelListDescriptionParser
-        }
+        self.parsers = {"youtube#channelListResponse": ChannelListDescriptionParser}
 
 
 CountryResult = Result[str, str]
 
 
-class YoutubeChannelListCountryParser:
+class ChannelListCountryParser:
     @staticmethod
     def parse(_: CountryResult, api_response: ApiResponse) -> CountryResult:
         try:
@@ -111,13 +110,13 @@ class YoutubeChannelListCountryParser:
 class CountryPipelineField:
     def __init__(self):
         self.result: CountryResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": YoutubeChannelListCountryParser}
+        self.parsers = {"youtube#channelListResponse": ChannelListCountryParser}
 
 
 PublishedAtResult = Result[datetime, str]
 
 
-class YoutubeChannelListPublishedAtParser:
+class ChannelListPublishedAtParser:
     @staticmethod
     def parse(_: PublishedAtResult, api_response: ApiResponse) -> PublishedAtResult:
         try:
@@ -136,15 +135,13 @@ class YoutubeChannelListPublishedAtParser:
 class PublishedAtPipelineField:
     def __init__(self):
         self.result: PublishedAtResult = Err("Not loaded yet")
-        self.parsers = {
-            "youtube#channelListResponse": YoutubeChannelListPublishedAtParser
-        }
+        self.parsers = {"youtube#channelListResponse": ChannelListPublishedAtParser}
 
 
 SubscriberCountResult = Result[int, str]
 
 
-class YoutubeChannelListSubscriberCountParser:
+class ChannelListSubscriberCountParser:
     @staticmethod
     def parse(
         _: SubscriberCountResult, api_response: ApiResponse
@@ -160,15 +157,13 @@ class YoutubeChannelListSubscriberCountParser:
 class SubscriberCountPipelineField:
     def __init__(self):
         self.result: SubscriberCountResult = Err("Not loaded yet")
-        self.parsers = {
-            "youtube#channelListResponse": YoutubeChannelListSubscriberCountParser
-        }
+        self.parsers = {"youtube#channelListResponse": ChannelListSubscriberCountParser}
 
 
 ViewCountResult = Result[int, str]
 
 
-class YoutubeChannelListViewCountParser:
+class ChannelListViewCountParser:
     @staticmethod
     def parse(_: ViewCountResult, api_response: ApiResponse) -> ViewCountResult:
         try:
@@ -182,9 +177,7 @@ class YoutubeChannelListViewCountParser:
 class ViewCountPipelineField:
     def __init__(self):
         self.result: ViewCountResult = Err("Not loaded yet")
-        self.parsers = {
-            "youtube#channelListResponse": YoutubeChannelListViewCountParser
-        }
+        self.parsers = {"youtube#channelListResponse": ChannelListViewCountParser}
 
 
 UploadsPlaylistId = NewType("UploadsPlaylistId", str)
@@ -192,7 +185,7 @@ UploadsPlaylistId = NewType("UploadsPlaylistId", str)
 UploadsPlaylistIdResult = Result[UploadsPlaylistId, str]
 
 
-class YoutubeChannelListUploadsPlaylistIdParser:
+class ChannelListUploadsPlaylistIdParser:
     @staticmethod
     def parse(
         _: UploadsPlaylistIdResult, api_response: ApiResponse
@@ -211,7 +204,81 @@ class UploadsPlaylistIdPipelineField:
     def __init__(self):
         self.result: UploadsPlaylistIdResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": YoutubeChannelListUploadsPlaylistIdParser
+            "youtube#channelListResponse": ChannelListUploadsPlaylistIdParser
+        }
+
+
+# From the playlistItems response we need to parse
+# a list of video ids to be pulled in the videos request, note that request should clear the list
+# after successfully getting said videos
+# the pageToken for the next playlistItems request (if number of videos above = MAX_RESULTS)
+
+# Note the playlistItems requests are run synchronously. We need the previous result for the
+# nextPageToken and to figure out if we need to run it again to fulfill the requirements
+
+
+NextPageTokenResult = Result[str, str]
+
+
+class PlaylistItemsNextPageTokenParser:
+    @staticmethod
+    def parse(_: NextPageTokenResult, api_response: ApiResponse) -> NextPageTokenResult:
+        try:
+            next_page_token = api_response["data"]["nextPageToken"]
+            return Ok(next_page_token)
+        except KeyError as err:
+            return Err(f"Could not parse next_page_token: {str(err)}")
+
+
+class PlaylistItemsNextPageTokenPipelineField:
+    def __init__(self):
+        self.result: NextPageTokenResult = Ok("")
+        self.parsers = {
+            "youtube#playlistItemListResponse": PlaylistItemsNextPageTokenParser
+        }
+
+
+VideoId = NewType("VideoId", str)
+VideoIdsToQueryResult = Result[List[VideoId], str]
+
+
+class PlaylistItemsVideoIdsToQueryResultParser:
+    @staticmethod
+    def parse(
+        current_result: VideoIdsToQueryResult, api_response: ApiResponse
+    ) -> VideoIdsToQueryResult:
+        try:
+            items = api_response["data"]["items"]
+            resources = [r["snippet"]["resourceId"] for r in items]
+        except KeyError as err:
+            # Log the error and return the previous result which might have valid VideoIds from a
+            # previous request
+            logging.error(f"Could not parse items for video_ids_to_query: {str(err)}")
+            return current_result
+
+        if isinstance(current_result, Err):
+            logging.error(
+                f"VideoIdsToQuery had an Err! Resetting. {current_result.unwrap_err()}"
+            )
+            current_result = Ok([])
+
+        video_ids: List[VideoId] = current_result.unwrap() + [
+            VideoId(r["videoId"]) for r in resources if r["kind"] == "youtube#video"
+        ]
+        return Ok(video_ids)
+
+
+class VideoIdsToQueryPipelineField:
+    """
+    A PipelineField that holds VideoIds that have not been queried yet for more information.
+    Each call to /videos need to pop at most MAX_RESULTS (currently 50) out of this field for
+    processing
+    """
+
+    def __init__(self):
+        self.result: VideoIdsToQueryResult = Ok([])
+        self.parsers = {
+            "youtube#playlistItemListResponse": PlaylistItemsVideoIdsToQueryResultParser
         }
 
 
@@ -228,31 +295,30 @@ class Channel:
         self.subscriber_count = SubscriberCountPipelineField()
         self.view_count = ViewCountPipelineField()
         self.uploads_playlist_id = UploadsPlaylistIdPipelineField()
+        self.playlist_items_next_page_token = PlaylistItemsNextPageTokenPipelineField()
+        self.video_ids_to_query = VideoIdsToQueryPipelineField()
 
     def ingest(self, api_response: ApiResponseResult) -> None:
         if isinstance(api_response, Err):
-            # TODO: log?
+            logging.error(api_response.unwrap_err())
             return
 
         response = api_response.unwrap()
 
         for field in self._pipeline_fields():
-            # If already parsed from a previous response skip this field
-            if isinstance(field.result, Ok):
-                continue
-
             # Try to parse from this response
             parser = field.parsers.get(response["kind"], NoOpParser)
             field.result = parser.parse(field.result, response)
 
     def __repr__(self) -> str:
-        channel = "\n\n** Channel data **\n\n"
+        channel_info = "\n\n** Channel data **\n\n"
         for field_name, field in vars(self).items():
             if field_name == "id_":
-                channel += f"[id_]\n{field}\n\n"
+                channel_info += f"[id_]\n{field}\n"
                 continue
-            channel += f"[{field_name}]\n{field.result.value}\n\n"
-        return channel
+            channel_info += f"[{field_name}]\n{field.result.value}\n"
+        channel_info += "\n ** END of Channel Data **\n\n"
+        return channel_info
 
     def _pipeline_fields(self):
         fields = vars(self)

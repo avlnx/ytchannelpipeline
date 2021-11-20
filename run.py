@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import random
 from pprint import pprint
 from typing import List, TypeVar, Callable, Any
 from functools import wraps
@@ -24,7 +26,26 @@ from my_types import (
 )
 
 
-MAX_RESULTS = 1
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def api_response(func: F) -> F:
+    """
+    Decorator used to standardize responses to an expected format
+    :param func: Api getter function
+    :return: an ApiResponse wrapped in an ApiResponseResult
+    """
+
+    @wraps(func)
+    async def as_api_response_result(*args, **kwargs) -> ApiResponseResult:
+        result = await func(*args, **kwargs)
+        if isinstance(result, Err):
+            return result
+
+        data = result.unwrap()
+        return Ok(ApiResponse(kind=data["kind"], data=data))
+
+    return as_api_response_result
 
 
 def build_youtube_client_getter(developer_key: str) -> YoutubeClientGetter:
@@ -58,35 +79,17 @@ def build_youtube_client_getter(developer_key: str) -> YoutubeClientGetter:
     return make_client
 
 
-# Note the actual youtube client is not in global scope, just the getter of the client
-# youtube: YoutubeClientGetter = build_youtube_client_getter(settings.DEVELOPER_KEY)
-
-
-F = TypeVar("F", bound=Callable[..., Any])
-
-
-# decorator that turns ApiResults into ApiResponseResults
-def api_response(func: F) -> F:
-    @wraps(func)
-    async def as_api_response_result(*args, **kwargs) -> ApiResponseResult:
-        result = await func(*args, **kwargs)
-        if isinstance(result, Err):
-            return result
-
-        data = result.unwrap()
-        return Ok(ApiResponse(kind=data["kind"], data=data))
-
-    return as_api_response_result
+# Note the actual youtube client is not in global scope, just the getter of the client (a closure)
+youtube: YoutubeClientGetter = build_youtube_client_getter(settings.DEVELOPER_KEY)
 
 
 @api_response
-async def get(youtube: YoutubeClientGetter, channel: Channel) -> ApiResult:
+async def get(channel: Channel) -> ApiResult:
     client = youtube()
     if isinstance(client, Err):
         return Err(client.unwrap_err())
 
-    logging.info(f"Sleeping for 5 seconds before getting {channel.id_}")
-    await asyncio.sleep(5)
+    await nap_before(f"getting {channel.id_}")
 
     request = (
         client.unwrap()
@@ -101,21 +104,19 @@ async def get(youtube: YoutubeClientGetter, channel: Channel) -> ApiResult:
     try:
         result = request.execute()
     except googleapiclient.errors.Error as err:
-        return Err(f"[get_channel] {str(err)}")
+        return Err(f"[get] {str(err)}")
     except Exception as err:
-        return Err(f"[get_channel] {str(err)}")
+        return Err(f"[get] {str(err)}")
 
     # Check the channel was actually found since technically it's not an Error :/
     if result["pageInfo"]["totalResults"] == 0:
-        return Err(f"[get_channel] Channel not found {channel.id_}")
+        return Err(f"[get] Channel not found {channel.id_}")
 
     return Ok(result)
 
 
 @api_response
-async def get_next_playlist_items_for(
-    youtube: YoutubeClientGetter, channel: Channel
-) -> ApiResult:
+async def get_next_playlist_items_for(channel: Channel) -> ApiResult:
     uploads_playlist_id_result = channel.uploads_playlist_id.result
     if isinstance(uploads_playlist_id_result, Err):
         return Err(uploads_playlist_id_result.unwrap_err())
@@ -124,10 +125,7 @@ async def get_next_playlist_items_for(
     if isinstance(client, Err):
         return Err(client.unwrap_err())
 
-    logging.info(
-        f"Sleeping for 5 seconds before getting playlist items for {channel.title.result.value}"
-    )
-    await asyncio.sleep(5)
+    await nap_before(f"getting playlist items for {channel.title.result.value}")
 
     request = (
         client.unwrap()
@@ -135,7 +133,7 @@ async def get_next_playlist_items_for(
         .list(
             part="snippet,contentDetails,status,id",
             playlistId=uploads_playlist_id_result.unwrap(),
-            maxResults=MAX_RESULTS,
+            maxResults=settings.MAX_RESULTS,
             pageToken=channel.playlist_items_next_page_token.result.unwrap(),
         )
     )
@@ -143,144 +141,134 @@ async def get_next_playlist_items_for(
     try:
         result = request.execute()
     except googleapiclient.errors.Error as err:
-        return Err(f"[get_playlist_items_with] {str(err)}")
+        return Err(f"[get_next_playlist_items_for] {str(err)}")
     except Exception as err:
-        return Err(f"[get_playlist_items_with] {str(err)}")
+        return Err(f"[get_next_playlist_items_for] {str(err)}")
 
     return Ok(result)
 
 
-# @api_response
-# async def get_videos_from(
-#     youtube: YoutubeClientGetter, playlist_items: PlaylistItemsResult
-# ) -> ApiResult:
-#     if isinstance(playlist_items, Err):
-#         return Err(playlist_items.unwrap_err())
-#
-#     client = youtube()
-#     if isinstance(client, Err):
-#         return Err(client.unwrap_err())
-#
-#     try:
-#         video_ids = ",".join(
-#             [v["contentDetails"]["videoId"] for v in playlist_items.unwrap()["items"]]
-#         )
-#     except (KeyError, IndexError, ValueError) as err:
-#         return Err(f"[get_videos_from] {str(err)}")
-#
-#     request = (
-#         client.unwrap()
-#         .videos()
-#         .list(
-#             part="snippet,contentDetails,status,id",
-#             id=video_ids,
-#             maxResults=MAX_RESULTS,
-#         )
-#     )
-#
-#     try:
-#         result = request.execute()
-#     except googleapiclient.errors.Error as err:
-#         return Err(f"[get_videos_from] {str(err)}")
-#     except Exception as err:
-#         return Err(f"[get_videos_from] {str(err)}")
-#
-#     return Ok(result)
+@api_response
+async def get_videos_with(ids: str) -> ApiResult:
 
+    client = youtube()
+    if isinstance(client, Err):
+        return Err(client.unwrap_err())
 
-# @api_response
-# async def get_videos_for_channel(
-#     youtube: YoutubeClientGetter, channel: Channel
-# ) -> ApiResult:
-#     channel = await get(youtube, channel.id_)
-#     playlist_id = parse_uploads_playlist_from(channel)
-#     playlist_items = await get_next_playlist_items_for(youtube, playlist_id)
-#     videos = await get_videos_from(youtube, playlist_items)
-#     return videos
+    await nap_before(f"getting videos {ids}")
 
-
-async def process(channel: Channel):
-    # TODO: they all can take youtube,channel right?
-
-    get_channel_response: ApiResponseResult = await get(channel.id_)
-
-    # populate Channel fields that are parseable from the response above
-    channel.ingest(get_channel_response)
-
-    # pprint(channel)
-
-    get_playlist_items_response: ApiResponseResult = await get_next_playlist_items_for(
-        channel
+    request = (
+        client.unwrap()
+        .videos()
+        .list(
+            part="snippet,contentDetails,status,id",
+            id=ids,
+            maxResults=settings.MAX_RESULTS,
+        )
     )
-    logging.info(f"Just got some playlist items for channel {channel.id_}...")
 
-    # TODO: populate Channel fields that are parseable from the response above
-    channel.ingest(get_playlist_items_response)
+    try:
+        result = request.execute()
+    except googleapiclient.errors.Error as err:
+        return Err(f"[get_videos_with] {str(err)}")
+    except Exception as err:
+        return Err(f"[get_videos_with] {str(err)}")
 
-    # pprint(channel)
+    return Ok(result)
 
-    # Now do it again
-    get_playlist_items_response: ApiResponseResult = await get_next_playlist_items_for(
-        channel
-    )
-    logging.info(f"Just got even more playlist items for channel {channel.id_}...")
 
-    # TODO: populate Channel fields that are parseable from the response above
-    channel.ingest(get_playlist_items_response)
+async def video_worker(worker_name: str, video_queue: asyncio.Queue) -> None:
+    while True:
+        channel, channel_semaphore, ids = await video_queue.get()
 
-    # Since the cost for a videos/ call is 1, we can call it twice for each channel hence getting up
-    # to 100 videos. This solves all video calculation requests but:
-    # - median of video views from videos released between 30 and 360 days ago
-    #   (solves if the date range expires within the 100)
-    # - top 2 videos by total views (solves if within latest 100)
-    # pprint(channel)
+        channel_title = channel.title.result.unwrap()
+
+        logging.info(f"[{worker_name}]: Getting a bunch of videos for {channel_title}")
+
+        response: ApiResponseResult = await get_videos_with(ids)
+
+        async with channel_semaphore:
+            # update channel knowing we are the only worker doing it
+            channel.ingest(response)
+
+        logging.info(
+            f"[{worker_name}]: Finished processing a bunch of videos for {channel_title}"
+        )
+
+        # notify queue we finished processing this chunk
+        video_queue.task_done()
 
 
 async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None:
-    while True:
-        # One youtube client per worker
-        youtube = build_youtube_client_getter(settings.DEVELOPER_KEY)
+    # initialize a video_queue for this channel_worker
+    video_queue = asyncio.Queue()
 
+    # Create some worker tasks to process the video_queue concurrently
+    tasks = []
+    for i in range(settings.VIDEO_WORKERS_PER_CHANNEL_WORKER):
+        task = asyncio.create_task(
+            video_worker(f"video-worker-{i}-{worker_name}", video_queue)
+        )
+        tasks.append(task)
+
+    while True:
         # Get a ChannelId from the queue for processing
         channel = await channel_queue.get()
-        logging.info(f"[{worker_name}] says: Now processing channel {channel.id_}...")
+        logging.info(f"[{worker_name}]: Now processing channel {channel.id_}...")
 
         # Process one Channel
-        response: ApiResponseResult = await get(youtube, channel)
+        response: ApiResponseResult = await get(channel)
 
         # populate Channel fields that are parseable from the response above
         channel.ingest(response)
 
-        # get playlist items for this channel
-        playlist_items_response: ApiResponseResult = await get_next_playlist_items_for(
-            youtube, channel
+        channel_title = channel.title.result.value
+
+        # Get VideoIds for this channel
+        number_of_calls_needed = math.ceil(
+            settings.VIDEOS_NEEDED_PER_CHANNEL / settings.MAX_RESULTS
         )
+
+        for i in range(number_of_calls_needed):
+            # get playlist items for this channel
+            # TODO: pass in remaining max_results instead of hard coding to max_results otherwise
+            #  if needed isn't a multiple of max_results we'll end up with more videos than needed
+            playlist_items_response: ApiResponseResult = (
+                await get_next_playlist_items_for(channel)
+            )
+            logging.info(
+                f"[{worker_name}]: Just got [{i + 1}/{number_of_calls_needed}] playlist items "
+                f"for {channel_title}..."
+            )
+
+            # Ingest the playlist_items data
+            channel.ingest(playlist_items_response)
+
+        # channel.video_ids_to_query PipelineField now has all the VideoIds we need to pull
+        # Add items to this channel_worker's video_queue. Note each item is a tuple of:
+        # - chunk of settings.MAX_RESULTS VideoIds joined together like id1,id2,id3 ... id50
+        # - channel instance that will get updated with the Videos
+        # - channel_semaphore to coordinate the async work done on the shared channel instance
+
+        # get a semaphore for the shared channel instance
+        channel_semaphore = asyncio.BoundedSemaphore(1)
+        for chunk in channel.video_ids_to_query.as_chunked_video_ids_strings():
+            video_queue.put_nowait((channel, channel_semaphore, chunk))
+
         logging.info(
-            f"[{worker_name}] says: Just got some playlist items "
-            f"for [{channel.title.result.value}]..."
+            f"[{worker_name}]: Processing videos for channel {channel_title}..."
         )
 
-        # Ingest the playlist_items data
-        channel.ingest(playlist_items_response)
+        await video_queue.join()
 
-        # do it again to just check it's working async
-        # get playlist items for this channel
-        playlist_items_response: ApiResponseResult = await get_next_playlist_items_for(
-            youtube, channel
-        )
-        logging.info(
-            f"[{worker_name}] says: Wow! Just got even more playlist items "
-            f"for [{channel.title.result.value}]..."
-        )
+        logging.info(f"[{worker_name}]: Finished processing {channel_title}")
 
-        # Ingest the playlist_items data
-        channel.ingest(playlist_items_response)
+        # We're done, cancel the video worker tasks so they unlock
+        for task in tasks:
+            task.cancel()
 
-        logging.info(
-            f"[{worker_name}] says: Finished processing [{channel.title.result.value}]:"
-        )
-
-        # pprint(channel)
+        # Wait until all video worker tasks are cancelled
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # Notify the queue this "work item" has been processed
         channel_queue.task_done()
@@ -302,6 +290,7 @@ async def main():
     def initialize():
         check_youtube_client_configuration()
         set_logging_level()
+        youtube()
 
     initialize()
 
@@ -317,7 +306,7 @@ async def main():
         # Put all channel_ids in the queue for processing
         channel_queue.put_nowait(channel)
 
-    # Create some worker tasks to process the queue concurrently
+    # Create some worker tasks to process the channel_queue concurrently
     tasks = []
     for i in range(settings.CHANNEL_WORKERS):
         task = asyncio.create_task(channel_worker(f"channel-worker-{i}", channel_queue))
@@ -326,7 +315,7 @@ async def main():
     # Wait until the queue is fully processed, as in, all Channels have been processed
     await channel_queue.join()
 
-    logging.info("Just finished processing all channels")
+    logging.info("Just finished processing all channels. Cleaning up...")
 
     # We're done, cancel the worker tasks so they unlock
     for task in tasks:
@@ -335,12 +324,21 @@ async def main():
     # Wait until all worker tasks are cancelled
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    logging.info("All waiting tasks were successfully cancelled, good bye...")
+    for channel in channels:
+        pprint(channel)
 
-    # youtube: YoutubeClientGetter = build_youtube_client_getter(developer_key)
-    # check_youtube_client_getter(youtube)
-    #
-    # await asyncio.gather(*(process(youtube, channel) for channel in channels))
+    logging.info("All Done! Good bye...")
+
+
+async def nap_before(action: str = "doing something") -> None:
+    """
+    Simulate latency in requests if DEBUG
+    :param action: The action you're about to take
+    """
+    if settings.DEBUG:
+        nap_time = random.randint(1, 3)
+        logging.debug(f"Sleeping for {nap_time} seconds before {action}")
+        await asyncio.sleep(nap_time)
 
 
 if __name__ == "__main__":

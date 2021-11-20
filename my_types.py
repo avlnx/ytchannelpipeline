@@ -2,10 +2,12 @@ from typing import Callable, Dict, TypeVar, List
 from datetime import datetime
 import dateutil.parser
 import logging
+import itertools
 
 from result import Result, Err, Ok
 from typing_extensions import NewType, Protocol, TypedDict, Literal
 
+import settings
 
 YoutubeClient = NewType("YoutubeClient", object)
 
@@ -16,7 +18,9 @@ YoutubeClientGetter = Callable[[], YoutubeClientResult]
 ApiResult = Result[Dict, str]
 
 ApiResponseKind = Literal[
-    "youtube#channelListResponse", "youtube#playlistItemListResponse"
+    "youtube#channelListResponse",
+    "youtube#playlistItemListResponse",
+    "youtube#videoListResponse",
 ]
 
 
@@ -53,12 +57,12 @@ class NoOpParser:
 # parser that conforms to the ApiResponseParser protocol. See the example below for the title field.
 # Then just add the field instance to the Channel class and instantiate it in __init__()
 
-TitleResult = Result[str, str]
+ChannelTitleResult = Result[str, str]
 
 
 class ChannelListTitleParser:
     @staticmethod
-    def parse(_: TitleResult, api_response: ApiResponse) -> TitleResult:
+    def parse(_: ChannelTitleResult, api_response: ApiResponse) -> ChannelTitleResult:
         try:
             channel_data = api_response["data"]["items"][0]
             title = channel_data["brandingSettings"]["channel"]["title"]
@@ -67,9 +71,9 @@ class ChannelListTitleParser:
             return Err(f"Could not parse title: {str(err)}")
 
 
-class TitlePipelineField:
+class ChannelTitlePipelineField:
     def __init__(self):
-        self.result: TitleResult = Err("Not loaded yet")
+        self.result: ChannelTitleResult = Err("Not loaded yet")
         self.parsers = {"youtube#channelListResponse": ChannelListTitleParser}
 
 
@@ -281,6 +285,99 @@ class VideoIdsToQueryPipelineField:
             "youtube#playlistItemListResponse": PlaylistItemsVideoIdsToQueryResultParser
         }
 
+    def as_chunked_video_ids_strings(self) -> List[str]:
+        def chunk(it, size):
+            it = iter(it)
+            return iter(lambda: tuple(itertools.islice(it, size)), ())
+
+        video_ids_to_query = self.result
+
+        if isinstance(video_ids_to_query, Err):
+            logging.error(
+                f"Could not chunk video_ids_to_query. {str(video_ids_to_query.unwrap_err())}"
+            )
+            return []
+
+        pending_video_ids = video_ids_to_query.unwrap()
+
+        result = []
+        for c in chunk(pending_video_ids, settings.MAX_RESULTS):
+            result.append(",".join(c))
+
+        return result
+
+
+VideoTitleResult = Result[str, str]
+
+VideoDescriptionResult = Result[str, str]
+
+
+class Video:
+    def __init__(self, id_: VideoId):
+        self.id_ = id_
+        self.title: VideoTitleResult = Err("Not parsed yet")
+        self.description: VideoDescriptionResult = Err("Not parsed yet")
+
+    def __repr__(self):
+        video_info = "\nVideo(\n"
+        field_reprs = []
+        for field_name, field in vars(self).items():
+            value = field if field_name == "id_" else f"{field.value[:30]}[...]"
+            field_reprs.append(f"  {field_name}={value}")
+        video_info += "\n".join(field_reprs)
+        video_info += "\n)"
+        return video_info
+
+
+class GenericDictPathParser:
+    @staticmethod
+    def parse(current_result: T, data: Dict, path: List[str]) -> T:
+        try:
+            for field in path:
+                data = data[field]
+        except (KeyError, IndexError, ValueError) as err:
+            logging.error(f"Could not traverse path {path} in {data}: {str(err)}")
+            return current_result
+        return Ok(data)
+
+
+VideosResult = Result[List[Video], str]
+
+
+class VideoListVideosParser:
+    @staticmethod
+    def parse(current_result: VideosResult, api_response: ApiResponse) -> VideosResult:
+        try:
+            items = api_response["data"]["items"]
+        except KeyError as err:
+            return Err(f"Could not parse items for videos: {str(err)}")
+
+        if isinstance(current_result, Err):
+            logging.error(
+                f"VideoList had an Err! Resetting. {current_result.unwrap_err()}"
+            )
+            current_result = Ok([])
+
+        videos = current_result.unwrap()
+
+        for item in items:
+            video = Video(id_=VideoId(item["id"]))
+            video.title = GenericDictPathParser.parse(
+                video.title, item, ["snippet", "title"]
+            )
+            video.description = GenericDictPathParser.parse(
+                video.description, item, ["snippet", "description"]
+            )
+            videos.append(video)
+
+        return Ok(videos)
+
+
+class VideoListPipelineField:
+    def __init__(self):
+        self.result: VideosResult = Ok([])
+        self.parsers = {"youtube#videoListResponse": VideoListVideosParser}
+
 
 ChannelId = NewType("ChannelId", str)
 
@@ -288,7 +385,7 @@ ChannelId = NewType("ChannelId", str)
 class Channel:
     def __init__(self, id_: ChannelId):
         self.id_ = id_
-        self.title = TitlePipelineField()
+        self.title = ChannelTitlePipelineField()
         self.description = DescriptionPipelineField()
         self.country = CountryPipelineField()
         self.published_at = PublishedAtPipelineField()
@@ -297,6 +394,7 @@ class Channel:
         self.uploads_playlist_id = UploadsPlaylistIdPipelineField()
         self.playlist_items_next_page_token = PlaylistItemsNextPageTokenPipelineField()
         self.video_ids_to_query = VideoIdsToQueryPipelineField()
+        self.videos = VideoListPipelineField()
 
     def ingest(self, api_response: ApiResponseResult) -> None:
         if isinstance(api_response, Err):

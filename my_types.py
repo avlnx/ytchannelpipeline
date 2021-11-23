@@ -1,4 +1,4 @@
-from typing import Callable, Dict, TypeVar, List
+from typing import Callable, Dict, TypeVar, List, Union, Any
 from datetime import datetime
 import dateutil.parser
 import logging
@@ -9,6 +9,12 @@ from typing_extensions import NewType, Protocol, TypedDict, Literal
 
 import settings
 
+T = TypeVar("T")
+
+U = TypeVar("U")
+
+TyperFunction = Callable[[T], U]
+
 YoutubeClient = NewType("YoutubeClient", object)
 
 YoutubeClientResult = Result[YoutubeClient, str]
@@ -16,6 +22,8 @@ YoutubeClientResult = Result[YoutubeClient, str]
 YoutubeClientGetter = Callable[[], YoutubeClientResult]
 
 ApiResult = Result[Dict, str]
+
+DictPathKey = Union[str, int]
 
 ApiResponseKind = Literal[
     "youtube#channelListResponse",
@@ -32,12 +40,8 @@ class ApiResponse(TypedDict):
 ApiResponseResult = Result[ApiResponse, str]
 
 
-T = TypeVar("T")
-
-
 class ApiResponseParser(Protocol[T]):
-    @staticmethod
-    def parse(current_result: T, api_response: ApiResponse) -> T:
+    def __call__(self, current_result: T, data: ApiResponse) -> T:
         ...
 
 
@@ -47,141 +51,173 @@ class PipelineField(Protocol[T]):
     parsers: Dict[ApiResponseKind, ApiResponseParser]
 
 
-class NoOpParser:
-    @staticmethod
-    def parse(current_result: T, _: ApiResponse) -> T:
+def string_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
+    def parser(current_result: T, data: ApiResponse) -> T:
+        try:
+            for field in path:
+                data = data[field]
+        except (KeyError, IndexError, ValueError) as err:
+            logging.error(f"Could not traverse path {path} in {data}: {str(err)}")
+            return current_result
+        return Ok(data)
+
+    return parser
+
+
+def typing_parser_for_path(
+    path: List[DictPathKey], typer: TyperFunction
+) -> ApiResponseParser:
+    dict_path_parser = string_parser_for_path(path)
+
+    def typed_parser(current_result: T, data: ApiResponse) -> T:
+        raw_string_result = dict_path_parser(current_result, data)
+        if isinstance(raw_string_result, Err):
+            return raw_string_result
+
+        try:
+            parsed_and_typed = typer(raw_string_result.unwrap())
+        except ValueError as err:
+            return Err(
+                f"Could not convert {raw_string_result.unwrap()} with {typer.__name__}."
+                f" {str(err)}"
+            )
+        return Ok(parsed_and_typed)
+
+    return typed_parser
+
+
+def typing_nested_dict_path_accumulator_parser(
+    parent_path: List[DictPathKey],
+    children_path: List[DictPathKey],
+    children_typer: TyperFunction,
+) -> ApiResponseParser:
+    dict_path_parser = string_parser_for_path(parent_path)
+
+    def nested_typed_parser(current_result: T, data: ApiResponse) -> T:
+        parent_dict_result: T = Err("Could not parse parent")
+        items = dict_path_parser(parent_dict_result, data)
+        if isinstance(items, Err):
+            return parent_dict_result
+
+        child_path_parser = typing_parser_for_path(children_path, children_typer)
+        # TODO: change Any into type of return of typer
+        child_dict_initial_result: Result[Any, str] = Err("Could not parse child")
+        items_data = items.unwrap()
+        new_results = [
+            child_path_parser(child_dict_initial_result, child_data)
+            for child_data in items_data
+        ]
+
+        if isinstance(current_result, Err):
+            logging.error(
+                f"Parent had an Err! Resetting. {current_result.unwrap_err()}"
+            )
+            current_result = Ok([])
+
+        all_results = current_result.unwrap() + new_results
+
+        return Ok(all_results)
+
+    return nested_typed_parser
+
+
+def datetime_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
+    return typing_parser_for_path(path, dateutil.parser.isoparse)
+
+
+def int_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
+    return typing_parser_for_path(path, int)
+
+
+def noop_parser() -> ApiResponseParser:
+    def parser(current_result: T, _: ApiResponse) -> T:
         return current_result
 
+    return parser
 
-# For each field you plan to parse add a class that conforms To the PipelineField Protocol and a
-# parser that conforms to the ApiResponseParser protocol. See the example below for the title field.
+
+# For each field you plan to parse add a class that conforms To the PipelineField Protocol and
+# either use one of the above parsers or create another one that conforms to the ApiResponseParser
+# protocol. See the example below for the title field.
 # Then just add the field instance to the Channel class and instantiate it in __init__()
 
+
 ChannelTitleResult = Result[str, str]
-
-
-class ChannelListTitleParser:
-    @staticmethod
-    def parse(_: ChannelTitleResult, api_response: ApiResponse) -> ChannelTitleResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            title = channel_data["brandingSettings"]["channel"]["title"]
-            return Ok(title)
-        except (KeyError, IndexError) as err:
-            return Err(f"Could not parse title: {str(err)}")
 
 
 class ChannelTitlePipelineField:
     def __init__(self):
         self.result: ChannelTitleResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": ChannelListTitleParser}
+        self.parsers = {
+            "youtube#channelListResponse": string_parser_for_path(
+                ["data", "items", 0, "brandingSettings", "channel", "title"]
+            )
+        }
 
 
 DescriptionResult = Result[str, str]
 
 
-class ChannelListDescriptionParser:
-    @staticmethod
-    def parse(_: DescriptionResult, api_response: ApiResponse) -> DescriptionResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            description = channel_data["brandingSettings"]["channel"]["description"]
-            return Ok(description)
-        except (KeyError, IndexError) as err:
-            return Err(f"Could not parse description: {str(err)}")
-
-
 class DescriptionPipelineField:
     def __init__(self):
         self.result: DescriptionResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": ChannelListDescriptionParser}
+        self.parsers = {
+            "youtube#channelListResponse": string_parser_for_path(
+                ["data", "items", 0, "brandingSettings", "channel", "description"]
+            )
+        }
 
 
 CountryResult = Result[str, str]
 
 
-class ChannelListCountryParser:
-    @staticmethod
-    def parse(_: CountryResult, api_response: ApiResponse) -> CountryResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            country = channel_data["brandingSettings"]["channel"]["country"]
-            return Ok(country)
-        except (KeyError, IndexError) as err:
-            return Err(f"Could not parse country: {str(err)}")
-
-
 class CountryPipelineField:
     def __init__(self):
         self.result: CountryResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": ChannelListCountryParser}
+        self.parsers = {
+            "youtube#channelListResponse": string_parser_for_path(
+                ["data", "items", 0, "brandingSettings", "channel", "country"]
+            )
+        }
 
 
 PublishedAtResult = Result[datetime, str]
 
 
-class ChannelListPublishedAtParser:
-    @staticmethod
-    def parse(_: PublishedAtResult, api_response: ApiResponse) -> PublishedAtResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            published_at = channel_data["snippet"]["publishedAt"]
-        except (KeyError, IndexError) as err:
-            return Err(f"Could not parse published_at: {str(err)}")
-        # parse date into timezone aware datetime. Format: ISO '2014-12-16T21:18:48Z'
-        try:
-            parsed_date = dateutil.parser.isoparse(published_at)
-        except ValueError as err:
-            return Err(f"Could not parse published_at {published_at}. {str(err)}")
-        return Ok(parsed_date)
-
-
 class PublishedAtPipelineField:
     def __init__(self):
         self.result: PublishedAtResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": ChannelListPublishedAtParser}
+        self.parsers = {
+            "youtube#channelListResponse": datetime_parser_for_path(
+                ["data", "items", 0, "snippet", "publishedAt"]
+            )
+        }
 
 
 SubscriberCountResult = Result[int, str]
 
 
-class ChannelListSubscriberCountParser:
-    @staticmethod
-    def parse(
-        _: SubscriberCountResult, api_response: ApiResponse
-    ) -> SubscriberCountResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            subscriber_count = channel_data["statistics"]["subscriberCount"]
-            return Ok(int(subscriber_count))
-        except (KeyError, IndexError, ValueError) as err:
-            return Err(f"Could not parse subscriber_count: {str(err)}")
-
-
 class SubscriberCountPipelineField:
     def __init__(self):
         self.result: SubscriberCountResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": ChannelListSubscriberCountParser}
+        self.parsers = {
+            "youtube#channelListResponse": int_parser_for_path(
+                ["data", "items", 0, "statistics", "subscriberCount"]
+            )
+        }
 
 
 ViewCountResult = Result[int, str]
 
 
-class ChannelListViewCountParser:
-    @staticmethod
-    def parse(_: ViewCountResult, api_response: ApiResponse) -> ViewCountResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            view_count = channel_data["statistics"]["viewCount"]
-            return Ok(int(view_count))
-        except (KeyError, IndexError, ValueError) as err:
-            return Err(f"Could not parse view_count: {str(err)}")
-
-
 class ViewCountPipelineField:
     def __init__(self):
         self.result: ViewCountResult = Err("Not loaded yet")
-        self.parsers = {"youtube#channelListResponse": ChannelListViewCountParser}
+        self.parsers = {
+            "youtube#channelListResponse": int_parser_for_path(
+                ["data", "items", 0, "statistics", "viewCount"]
+            )
+        }
 
 
 UploadsPlaylistId = NewType("UploadsPlaylistId", str)
@@ -189,26 +225,13 @@ UploadsPlaylistId = NewType("UploadsPlaylistId", str)
 UploadsPlaylistIdResult = Result[UploadsPlaylistId, str]
 
 
-class ChannelListUploadsPlaylistIdParser:
-    @staticmethod
-    def parse(
-        _: UploadsPlaylistIdResult, api_response: ApiResponse
-    ) -> UploadsPlaylistIdResult:
-        try:
-            channel_data = api_response["data"]["items"][0]
-            uploads_playlist_id = UploadsPlaylistId(
-                channel_data["contentDetails"]["relatedPlaylists"]["uploads"]
-            )
-            return Ok(uploads_playlist_id)
-        except (KeyError, IndexError) as err:
-            return Err(f"Could not parse uploads_playlist_id: {str(err)}")
-
-
 class UploadsPlaylistIdPipelineField:
     def __init__(self):
         self.result: UploadsPlaylistIdResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": ChannelListUploadsPlaylistIdParser
+            "youtube#channelListResponse": string_parser_for_path(
+                ["data", "items", 0, "contentDetails", "relatedPlaylists", "uploads"]
+            )
         }
 
 
@@ -224,57 +247,26 @@ class UploadsPlaylistIdPipelineField:
 NextPageTokenResult = Result[str, str]
 
 
-class PlaylistItemsNextPageTokenParser:
-    @staticmethod
-    def parse(_: NextPageTokenResult, api_response: ApiResponse) -> NextPageTokenResult:
-        try:
-            next_page_token = api_response["data"]["nextPageToken"]
-            return Ok(next_page_token)
-        except KeyError as err:
-            return Err(f"Could not parse next_page_token: {str(err)}")
-
-
 class PlaylistItemsNextPageTokenPipelineField:
     def __init__(self):
         self.result: NextPageTokenResult = Ok("")
         self.parsers = {
-            "youtube#playlistItemListResponse": PlaylistItemsNextPageTokenParser
+            "youtube#playlistItemListResponse": string_parser_for_path(
+                ["data", "nextPageToken"]
+            )
         }
 
 
 VideoId = NewType("VideoId", str)
-VideoIdsToQueryResult = Result[List[VideoId], str]
+VideoIdResult = Result[VideoId, str]
+VideoIdsToQueryResult = Result[List[VideoIdResult], str]
 
 
-class PlaylistItemsVideoIdsToQueryResultParser:
-    @staticmethod
-    def parse(
-        current_result: VideoIdsToQueryResult, api_response: ApiResponse
-    ) -> VideoIdsToQueryResult:
-        try:
-            items = api_response["data"]["items"]
-            resources = [r["snippet"]["resourceId"] for r in items]
-        except KeyError as err:
-            # Log the error and return the previous result which might have valid VideoIds from a
-            # previous request
-            logging.error(f"Could not parse items for video_ids_to_query: {str(err)}")
-            return current_result
-
-        if isinstance(current_result, Err):
-            logging.error(
-                f"VideoIdsToQuery had an Err! Resetting. {current_result.unwrap_err()}"
-            )
-            current_result = Ok([])
-
-        video_ids: List[VideoId] = current_result.unwrap() + [
-            VideoId(r["videoId"]) for r in resources if r["kind"] == "youtube#video"
-        ]
-        return Ok(video_ids)
-
-
+# TODO: we can probably replace this with a videoIdChunk field that just holds the str chunks if we
+#  don't need the ids later
 class VideoIdsToQueryPipelineField:
     """
-    A PipelineField that holds VideoIds that have not been queried yet for more information.
+    A PipelineField that holds VideoIdResults that have not been queried yet for more information.
     Each call to /videos need to pop at most MAX_RESULTS (currently 50) out of this field for
     processing
     """
@@ -282,7 +274,9 @@ class VideoIdsToQueryPipelineField:
     def __init__(self):
         self.result: VideoIdsToQueryResult = Ok([])
         self.parsers = {
-            "youtube#playlistItemListResponse": PlaylistItemsVideoIdsToQueryResultParser
+            "youtube#playlistItemListResponse": typing_nested_dict_path_accumulator_parser(
+                ["data", "items"], ["snippet", "resourceId", "videoId"], VideoId
+            )
         }
 
     def as_chunked_video_ids_strings(self) -> List[str]:
@@ -298,7 +292,9 @@ class VideoIdsToQueryPipelineField:
             )
             return []
 
-        pending_video_ids = video_ids_to_query.unwrap()
+        pending_video_ids = [
+            v.unwrap() for v in video_ids_to_query.unwrap() if isinstance(v, Ok)
+        ]
 
         result = []
         for c in chunk(pending_video_ids, settings.MAX_RESULTS):
@@ -329,54 +325,26 @@ class Video:
         return video_info
 
 
-class GenericDictPathParser:
-    @staticmethod
-    def parse(current_result: T, data: Dict, path: List[str]) -> T:
-        try:
-            for field in path:
-                data = data[field]
-        except (KeyError, IndexError, ValueError) as err:
-            logging.error(f"Could not traverse path {path} in {data}: {str(err)}")
-            return current_result
-        return Ok(data)
-
-
 VideosResult = Result[List[Video], str]
 
 
-class VideoListVideosParser:
-    @staticmethod
-    def parse(current_result: VideosResult, api_response: ApiResponse) -> VideosResult:
-        try:
-            items = api_response["data"]["items"]
-        except KeyError as err:
-            return Err(f"Could not parse items for videos: {str(err)}")
-
-        if isinstance(current_result, Err):
-            logging.error(
-                f"VideoList had an Err! Resetting. {current_result.unwrap_err()}"
-            )
-            current_result = Ok([])
-
-        videos = current_result.unwrap()
-
-        for item in items:
-            video = Video(id_=VideoId(item["id"]))
-            video.title = GenericDictPathParser.parse(
-                video.title, item, ["snippet", "title"]
-            )
-            video.description = GenericDictPathParser.parse(
-                video.description, item, ["snippet", "description"]
-            )
-            videos.append(video)
-
-        return Ok(videos)
+def video_typer(video_item: Dict) -> Video:
+    video = Video(id_=VideoId(video_item["id"]))
+    video.title = string_parser_for_path(["snippet", "title"])(video.title, video_item)
+    video.description = string_parser_for_path(["snippet", "description"])(
+        video.description, video_item
+    )
+    return video
 
 
 class VideoListPipelineField:
     def __init__(self):
         self.result: VideosResult = Ok([])
-        self.parsers = {"youtube#videoListResponse": VideoListVideosParser}
+        self.parsers = {
+            "youtube#videoListResponse": typing_nested_dict_path_accumulator_parser(
+                ["data", "items"], [], video_typer
+            )
+        }
 
 
 ChannelId = NewType("ChannelId", str)
@@ -405,8 +373,8 @@ class Channel:
 
         for field in self._pipeline_fields():
             # Try to parse from this response
-            parser = field.parsers.get(response["kind"], NoOpParser)
-            field.result = parser.parse(field.result, response)
+            parser = field.parsers.get(response["kind"], noop_parser())
+            field.result = parser(field.result, response)
 
     def __repr__(self) -> str:
         channel_info = "\n\n** Channel data **\n\n"

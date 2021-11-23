@@ -335,7 +335,7 @@ async def nap_before(action: str = "doing something") -> None:
     Simulate latency in requests if DEBUG
     :param action: The action you're about to take
     """
-    if settings.DEBUG:
+    if settings.DEBUG and settings.SIMULATE_LATENCY:
         nap_time = random.randint(1, 3)
         logging.debug(f"Sleeping for {nap_time} seconds before {action}")
         await asyncio.sleep(nap_time)

@@ -18,3 +18,5 @@ VIDEOS_NEEDED_PER_CHANNEL = 6 if DEBUG else 100
 
 # Max results returned by the youtube api calls. Currently 50
 MAX_RESULTS = 2 if DEBUG else 50
+
+SIMULATE_LATENCY = DEBUG

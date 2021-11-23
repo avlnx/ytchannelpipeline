@@ -182,7 +182,7 @@ class ChannelTitlePipelineField:
 DescriptionResult = Result[str, str]
 
 
-class DescriptionPipelineField:
+class ChannelDescriptionPipelineField:
     def __init__(self):
         self.result: DescriptionResult = Err("Not loaded yet")
         self.parsers = {
@@ -208,7 +208,7 @@ class CountryPipelineField:
 PublishedAtResult = Result[datetime, str]
 
 
-class PublishedAtPipelineField:
+class ChannelPublishedAtPipelineField:
     def __init__(self):
         self.result: PublishedAtResult = Err("Not loaded yet")
         self.parsers = {
@@ -234,7 +234,7 @@ class SubscriberCountPipelineField:
 ViewCountResult = Result[int, str]
 
 
-class ViewCountPipelineField:
+class ChannelViewCountPipelineField:
     def __init__(self):
         self.result: ViewCountResult = Err("Not loaded yet")
         self.parsers = {
@@ -249,7 +249,7 @@ UploadsPlaylistId = NewType("UploadsPlaylistId", str)
 UploadsPlaylistIdResult = Result[UploadsPlaylistId, str]
 
 
-class UploadsPlaylistIdPipelineField:
+class ChannelUploadsPlaylistIdPipelineField:
     def __init__(self):
         self.result: UploadsPlaylistIdResult = Err("Not loaded yet")
         self.parsers = {
@@ -271,7 +271,7 @@ class UploadsPlaylistIdPipelineField:
 NextPageTokenResult = Result[str, str]
 
 
-class PlaylistItemsNextPageTokenPipelineField:
+class ChannelPlaylistItemsNextPageTokenPipelineField:
     def __init__(self):
         self.result: NextPageTokenResult = Ok("")
         self.parsers = {
@@ -286,7 +286,7 @@ VideoIdResult = Result[VideoId, str]
 VideoIdsToQueryResult = Result[List[VideoIdResult], str]
 
 
-class VideoIdsToQueryPipelineField:
+class ChannelVideoIdsToQueryPipelineField:
     """
     A PipelineField that holds VideoIdResults that have not been queried yet for more information.
     Each call to /videos need to pop at most MAX_RESULTS (currently 50) out of this field for
@@ -369,7 +369,7 @@ class Video:
 VideosResult = Result[List[Video], str]
 
 
-class VideoListPipelineField:
+class ChannelVideoListPipelineField:
     def __init__(self):
         self.result: VideosResult = Ok([])
         self.parsers = {"internal#directAccumulator": direct_accumulator_parser()}
@@ -393,15 +393,17 @@ class Channel:
     def __init__(self, id_: ChannelId):
         self.id_ = ChannelIdPipelineField(id_)
         self.title = ChannelTitlePipelineField()
-        self.description = DescriptionPipelineField()
+        self.description = ChannelDescriptionPipelineField()
         self.country = CountryPipelineField()
-        self.published_at = PublishedAtPipelineField()
+        self.published_at = ChannelPublishedAtPipelineField()
         self.subscriber_count = SubscriberCountPipelineField()
-        self.view_count = ViewCountPipelineField()
-        self.uploads_playlist_id = UploadsPlaylistIdPipelineField()
-        self.playlist_items_next_page_token = PlaylistItemsNextPageTokenPipelineField()
-        self.video_ids_to_query = VideoIdsToQueryPipelineField()
-        self.videos = VideoListPipelineField()
+        self.view_count = ChannelViewCountPipelineField()
+        self.uploads_playlist_id = ChannelUploadsPlaylistIdPipelineField()
+        self.playlist_items_next_page_token = (
+            ChannelPlaylistItemsNextPageTokenPipelineField()
+        )
+        self.video_ids_to_query = ChannelVideoIdsToQueryPipelineField()
+        self.videos = ChannelVideoListPipelineField()
 
     def __repr__(self) -> str:
         return Represent(self).as_string()

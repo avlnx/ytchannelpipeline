@@ -1,4 +1,4 @@
-from typing import Callable, Dict, TypeVar, List, Union, Any
+from typing import Callable, Dict, TypeVar, List, Union, Any, Generic
 from datetime import datetime
 import dateutil.parser
 import logging
@@ -29,6 +29,8 @@ ApiResponseKind = Literal[
     "youtube#channelListResponse",
     "youtube#playlistItemListResponse",
     "youtube#videoListResponse",
+    "youtube#video",
+    "internal#directAccumulator",
 ]
 
 
@@ -62,6 +64,28 @@ def string_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
         return Ok(data)
 
     return parser
+
+
+def limited_size_string_parser_for_path(
+    path: List[DictPathKey], size: int = 30
+) -> ApiResponseParser:
+    string_parser = string_parser_for_path(path)
+
+    def limited_string_parser(current_result: T, data: ApiResponse) -> T:
+        raw_string_result = string_parser(current_result, data)
+        if isinstance(raw_string_result, Err):
+            return raw_string_result
+        return Ok(f"{raw_string_result.unwrap()[:size]}[...]")
+
+    return limited_string_parser
+
+
+def direct_accumulator_parser() -> ApiResponseParser:
+    def direct_accum(current_value: T, wrapped_value: ApiResponse) -> T:
+        all_values = current_value.unwrap() + wrapped_value["data"]["value"]
+        return Ok(all_values)
+
+    return direct_accum
 
 
 def typing_parser_for_path(
@@ -162,7 +186,7 @@ class DescriptionPipelineField:
     def __init__(self):
         self.result: DescriptionResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": string_parser_for_path(
+            "youtube#channelListResponse": limited_size_string_parser_for_path(
                 ["data", "items", 0, "brandingSettings", "channel", "description"]
             )
         }
@@ -262,8 +286,6 @@ VideoIdResult = Result[VideoId, str]
 VideoIdsToQueryResult = Result[List[VideoIdResult], str]
 
 
-# TODO: we can probably replace this with a videoIdChunk field that just holds the str chunks if we
-#  don't need the ids later
 class VideoIdsToQueryPipelineField:
     """
     A PipelineField that holds VideoIdResults that have not been queried yet for more information.
@@ -303,56 +325,73 @@ class VideoIdsToQueryPipelineField:
         return result
 
 
+VideoIdResult = Result[VideoId, str]
+
 VideoTitleResult = Result[str, str]
 
 VideoDescriptionResult = Result[str, str]
 
 
+class VideoIdPipelineField:
+    def __init__(self):
+        self.result: VideoIdResult = Err("Not set")
+        self.parsers = {"youtube#video": string_parser_for_path(["data", "id"])}
+
+
+class VideoTitlePipelineField:
+    def __init__(self):
+        self.result: VideoTitleResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": string_parser_for_path(["data", "snippet", "title"])
+        }
+
+
+class VideoDescriptionPipelineField:
+    def __init__(self):
+        self.result: VideoDescriptionResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": limited_size_string_parser_for_path(
+                ["data", "snippet", "description"]
+            )
+        }
+
+
 class Video:
-    def __init__(self, id_: VideoId):
-        self.id_ = id_
-        self.title: VideoTitleResult = Err("Not parsed yet")
-        self.description: VideoDescriptionResult = Err("Not parsed yet")
+    def __init__(self):
+        self.id_ = VideoIdPipelineField()
+        self.title = VideoTitlePipelineField()
+        self.description = VideoDescriptionPipelineField()
 
     def __repr__(self):
-        video_info = "\nVideo(\n"
-        field_reprs = []
-        for field_name, field in vars(self).items():
-            value = field if field_name == "id_" else f"{field.value[:30]}[...]"
-            field_reprs.append(f"  {field_name}={value}")
-        video_info += "\n".join(field_reprs)
-        video_info += "\n)"
-        return video_info
+        return Represent(self).as_string()
 
 
 VideosResult = Result[List[Video], str]
 
 
-def video_typer(video_item: Dict) -> Video:
-    video = Video(id_=VideoId(video_item["id"]))
-    video.title = string_parser_for_path(["snippet", "title"])(video.title, video_item)
-    video.description = string_parser_for_path(["snippet", "description"])(
-        video.description, video_item
-    )
-    return video
-
-
 class VideoListPipelineField:
     def __init__(self):
         self.result: VideosResult = Ok([])
+        self.parsers = {"internal#directAccumulator": direct_accumulator_parser()}
+
+
+ChannelId = NewType("ChannelId", str)
+ChannelIdResult = Result[ChannelId, str]
+
+
+class ChannelIdPipelineField:
+    def __init__(self, id_: ChannelId):
+        self.result: ChannelIdResult = Ok(id_)
         self.parsers = {
-            "youtube#videoListResponse": typing_nested_dict_path_accumulator_parser(
-                ["data", "items"], [], video_typer
+            "youtube#channelListResponse": string_parser_for_path(
+                ["data", "items", 0, "id"]
             )
         }
 
 
-ChannelId = NewType("ChannelId", str)
-
-
 class Channel:
     def __init__(self, id_: ChannelId):
-        self.id_ = id_
+        self.id_ = ChannelIdPipelineField(id_)
         self.title = ChannelTitlePipelineField()
         self.description = DescriptionPipelineField()
         self.country = CountryPipelineField()
@@ -364,32 +403,36 @@ class Channel:
         self.video_ids_to_query = VideoIdsToQueryPipelineField()
         self.videos = VideoListPipelineField()
 
-    def ingest(self, api_response: ApiResponseResult) -> None:
+    def __repr__(self) -> str:
+        return Represent(self).as_string()
+
+
+class Populate(Generic[T]):
+    def __init__(self, item: T):
+        self.item = item
+
+    def using(self, api_response: ApiResponseResult) -> T:
         if isinstance(api_response, Err):
             logging.error(api_response.unwrap_err())
-            return
+            return self.item
 
         response = api_response.unwrap()
 
-        for field in self._pipeline_fields():
+        for field in vars(self.item).values():
             # Try to parse from this response
             parser = field.parsers.get(response["kind"], noop_parser())
             field.result = parser(field.result, response)
 
-    def __repr__(self) -> str:
-        channel_info = "\n\n** Channel data **\n\n"
-        for field_name, field in vars(self).items():
-            if field_name == "id_":
-                channel_info += f"[id_]\n{field}\n"
-                continue
-            channel_info += f"[{field_name}]\n{field.result.value}\n"
-        channel_info += "\n ** END of Channel Data **\n\n"
-        return channel_info
+        return self.item
 
-    def _pipeline_fields(self):
-        fields = vars(self)
 
-        # Remove the id_ field since that's not a PipelineField and doesn't need to be processed
-        id_ = self.id_
+class Represent(Generic[T]):
+    def __init__(self, item: T):
+        self.item = item
 
-        return [f for f in fields.values() if f != id_]
+    def as_string(self) -> str:
+        info = f"\n{type(self.item).__name__.capitalize()}(\n"
+        for field_name, field in vars(self.item).items():
+            info += f"  {field_name}={field.result.value}\n"
+        info += "\n)"
+        return info

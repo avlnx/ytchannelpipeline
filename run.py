@@ -23,6 +23,8 @@ from my_types import (
     ApiResponseResult,
     ApiResponse,
     ApiResult,
+    Video,
+    Populate,
 )
 
 
@@ -89,7 +91,8 @@ async def get(channel: Channel) -> ApiResult:
     if isinstance(client, Err):
         return Err(client.unwrap_err())
 
-    await nap_before(f"getting {channel.id_}")
+    channel_id = channel.id_.result.unwrap()
+    await nap_before(f"getting {channel_id}")
 
     request = (
         client.unwrap()
@@ -97,7 +100,7 @@ async def get(channel: Channel) -> ApiResult:
         .list(
             part="brandingSettings,contentDetails,contentOwnerDetails,id,localizations,"
             "snippet,statistics,status,topicDetails",
-            id=channel.id_,
+            id=channel_id,
         )
     )
 
@@ -110,7 +113,7 @@ async def get(channel: Channel) -> ApiResult:
 
     # Check the channel was actually found since technically it's not an Error :/
     if result["pageInfo"]["totalResults"] == 0:
-        return Err(f"[get] Channel not found {channel.id_}")
+        return Err(f"[get] Channel not found {channel_id}")
 
     return Ok(result)
 
@@ -187,9 +190,33 @@ async def video_worker(worker_name: str, video_queue: asyncio.Queue) -> None:
 
         response: ApiResponseResult = await get_videos_with(ids)
 
+        # instead of blocking the channel instance which essentially makes the videos get processed
+        # synchronously, let's populate the Videos with their own data
+        if isinstance(response, Err):
+            # /videos request failed
+            logging.error(
+                f"/videos request failed for {channel_title}: {str(response.unwrap_err())} "
+            )
+            video_queue.task_done()
+
+        video_items = response.unwrap()["data"]["items"]
+        video_items_responses: List[ApiResponseResult] = [
+            Ok(ApiResponse(kind=video_item["kind"], data=video_item))
+            for video_item in video_items
+        ]
+
+        videos = [
+            Populate(Video()).using(video_item_response)
+            for video_item_response in video_items_responses
+        ]
+
+        direct_set_videos_response = Ok(
+            ApiResponse(kind="internal#directAccumulator", data={"value": videos})
+        )
+
         async with channel_semaphore:
             # update channel knowing we are the only worker doing it
-            channel.ingest(response)
+            Populate(channel).using(direct_set_videos_response)
 
         logging.info(
             f"[{worker_name}]: Finished processing a bunch of videos for {channel_title}"
@@ -214,13 +241,14 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
     while True:
         # Get a ChannelId from the queue for processing
         channel = await channel_queue.get()
-        logging.info(f"[{worker_name}]: Now processing channel {channel.id_}...")
+        logging.info(
+            f"[{worker_name}]: Now processing channel {channel.id_.result.value}..."
+        )
 
         # Process one Channel
         response: ApiResponseResult = await get(channel)
 
-        # populate Channel fields that are parseable from the response above
-        channel.ingest(response)
+        Populate(channel).using(response)
 
         channel_title = channel.title.result.value
 
@@ -241,8 +269,7 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
                 f"for {channel_title}..."
             )
 
-            # Ingest the playlist_items data
-            channel.ingest(playlist_items_response)
+            Populate(channel).using(playlist_items_response)
 
         # channel.video_ids_to_query PipelineField now has all the VideoIds we need to pull
         # Add items to this channel_worker's video_queue. Note each item is a tuple of:

@@ -165,7 +165,7 @@ async def get_videos_with(ids: str) -> ApiResult:
         client.unwrap()
         .videos()
         .list(
-            part="snippet,contentDetails,status,id",
+            part="snippet,contentDetails,status,id,statistics",
             id=ids,
             maxResults=settings.MAX_RESULTS,
         )

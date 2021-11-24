@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Callable, Dict, TypeVar, List, Union, Any, Generic, Optional
 from datetime import datetime
 import dateutil.parser
@@ -360,10 +361,6 @@ class ChannelVideoIdsToQueryPipelineField:
 
 VideoIdResult = Result[VideoId, str]
 
-VideoTitleResult = Result[str, str]
-
-VideoDescriptionResult = Result[str, str]
-
 
 class VideoIdPipelineField:
     result: VideoIdResult
@@ -372,6 +369,9 @@ class VideoIdPipelineField:
     def __init__(self):
         self.result: VideoIdResult = Err("Not set")
         self.parsers = {"youtube#video": string_parser_for_path(["data", "id"])}
+
+
+VideoTitleResult = Result[str, str]
 
 
 class VideoTitlePipelineField:
@@ -383,6 +383,9 @@ class VideoTitlePipelineField:
         self.parsers = {
             "youtube#video": string_parser_for_path(["data", "snippet", "title"])
         }
+
+
+VideoDescriptionResult = Result[str, str]
 
 
 class VideoDescriptionPipelineField:
@@ -398,11 +401,28 @@ class VideoDescriptionPipelineField:
         }
 
 
+VideoViewCountResult = Result[int, str]
+
+
+class VideoViewCountPipelineField:
+    result: VideoViewCountResult
+    parsers: PipelineFieldParsers
+
+    def __init__(self):
+        self.result: VideoDescriptionResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": typing_parser_for_path(
+                ["data", "statistics", "viewCount"], int
+            )
+        }
+
+
 class Video:
     def __init__(self):
         self.id_ = VideoIdPipelineField()
         self.title = VideoTitlePipelineField()
         self.description = VideoDescriptionPipelineField()
+        self.view_count = VideoViewCountPipelineField()
 
     def __repr__(self):
         return Represent(self).as_string()
@@ -493,7 +513,8 @@ ReportFieldDependencies = Dict[str, PipelineField]
 
 # A ReportFieldValue maps a column_name to a primitive value
 # Note that a field might generate more than one column
-ReportFieldValue = Dict[str, Union[str, int]]
+AllowedReportFieldValue = Union[str, int, datetime]
+ReportFieldValue = Dict[str, AllowedReportFieldValue]
 
 ReportRow = List[ReportFieldValue]
 
@@ -559,6 +580,42 @@ class LatestVideoLinkReportField:
         return [{"LatestVideoLink": video_link}]
 
 
+class Slice:
+    count: int
+    items: Result[List[Any]]
+    field_key: str
+    values: List[AllowedReportFieldValue]
+
+    def __init__(self, count: int, items_result: Result[List[Any], str]):
+        self.count = count
+        self.items = items_result
+        self.field_key = ""
+        # Initialize to empty state (not found)
+        self.values: List[AllowedReportFieldValue] = [
+            "Not found" for _ in range(self.count)
+        ]
+
+    def and_unwrap_their(self, field_key: str) -> Slice:
+        self.field_key = field_key
+
+        if isinstance(self.items, Err):
+            error_message = self.items.unwrap_err()
+            # Fill with errors
+            self.values = [error_message for _ in range(self.count)]
+        else:
+            up_to_count_items = itertools.islice(iter(self.items.unwrap()), self.count)
+            for i, item in enumerate(up_to_count_items):
+                # Replace as many empty states as possible
+                self.values[i] = getattr(item, self.field_key).result.value
+        return self
+
+    def as_column(self, column_name: str) -> ReportRow:
+        return [
+            {f"{column_name}-{i + 1}/{self.count}": value}
+            for i, value in enumerate(self.values)
+        ]
+
+
 class DescriptionOfTwoMostRecentVideosReportField:
     dependencies: ReportFieldDependencies
 
@@ -566,27 +623,29 @@ class DescriptionOfTwoMostRecentVideosReportField:
         self.dependencies = {"channel_videos": channel_videos}
 
     def values(self) -> ReportRow:
+        this_many = 2
         videos = self.dependencies["channel_videos"].result
+        return (
+            Slice(this_many, videos)
+            .and_unwrap_their("description")
+            .as_column("VideoDescription")
+        )
 
-        # Initialize to empty state
-        number_of_videos = 2
-        video_descriptions = ["Not found" for _ in range(number_of_videos)]
 
-        if isinstance(videos, Err):
-            error_message = videos.unwrap_err()
-            # Fill with errors
-            video_descriptions = [error_message, error_message]
-        else:
-            up_to_two_videos = itertools.islice(videos.unwrap(), number_of_videos)
-            for i, video in enumerate(up_to_two_videos):
-                # Replace empty states with as many as possible
-                video_descriptions[i] = video.description.result.value
+class ViewCountForTenMostRecentVideosReportField:
+    dependencies: ReportFieldDependencies
 
-        # Build ReportRow with video_descriptions
-        return [
-            {f"VideoDescription-{i+1}/{number_of_videos}": description}
-            for i, description in enumerate(video_descriptions)
-        ]
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        this_many = 10
+        videos = self.dependencies["channel_videos"].result
+        return (
+            Slice(this_many, videos)
+            .and_unwrap_their("view_count")
+            .as_column("VideoViewCount")
+        )
 
 
 class ReportRowFor:
@@ -606,6 +665,9 @@ class ReportRowFor:
         self.latest_video_link = LatestVideoLinkReportField(channel.videos)
         self.description_of_latest_two_videos = (
             DescriptionOfTwoMostRecentVideosReportField(channel.videos)
+        )
+        self.view_count_of_latest_ten_videos = (
+            ViewCountForTenMostRecentVideosReportField(channel.videos)
         )
 
         # Build all ReportFields

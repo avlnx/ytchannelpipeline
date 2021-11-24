@@ -540,6 +540,55 @@ class ChannelLinkReportField:
         ]
 
 
+class LatestVideoLinkReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        videos = self.dependencies["channel_videos"].result
+        if isinstance(videos, Err):
+            video_link = videos.unwrap_err()
+        else:
+            try:
+                video = next(iter(videos.unwrap()))
+                video_link = f"https://youtube.com/video/{video.id_.result.value}"
+            except StopIteration:
+                video_link = "No videos found"
+        return [{"LatestVideoLink": video_link}]
+
+
+class DescriptionOfTwoMostRecentVideosReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        videos = self.dependencies["channel_videos"].result
+
+        # Initialize to empty state
+        number_of_videos = 2
+        video_descriptions = ["Not found" for _ in range(number_of_videos)]
+
+        if isinstance(videos, Err):
+            error_message = videos.unwrap_err()
+            # Fill with errors
+            video_descriptions = [error_message, error_message]
+        else:
+            up_to_two_videos = itertools.islice(videos.unwrap(), number_of_videos)
+            for i, video in enumerate(up_to_two_videos):
+                # Replace empty states with as many as possible
+                video_descriptions[i] = video.description.result.value
+
+        # Build ReportRow with video_descriptions
+        return [
+            {f"VideoDescription-{i+1}/{number_of_videos}": description}
+            for i, description in enumerate(video_descriptions)
+        ]
+
+
 class ReportRowFor:
     def __init__(self, channel: Channel):
         self.channel_id = ReportFieldProxy(channel.id_)
@@ -553,6 +602,10 @@ class ReportRowFor:
         )
         self.view_count = ReportFieldProxy(
             channel.view_count, column_name="TotalNumberOfViews"
+        )
+        self.latest_video_link = LatestVideoLinkReportField(channel.videos)
+        self.description_of_latest_two_videos = (
+            DescriptionOfTwoMostRecentVideosReportField(channel.videos)
         )
 
         # Build all ReportFields

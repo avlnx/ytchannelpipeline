@@ -25,6 +25,7 @@ from my_types import (
     ApiResult,
     Video,
     Populate,
+    ReportRowFor,
 )
 
 
@@ -297,6 +298,12 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
         # Wait until all video worker tasks are cancelled
         await asyncio.gather(*tasks, return_exceptions=True)
 
+        # The channel instance has all the data needed, generate a ReportRow
+        report_row = ReportRowFor(channel)
+
+        logging.info(f"\n\n* [{worker_name}]: ReportRow for {channel_title}:\n")
+        logging.info(f"\n{str(report_row)}\n\n")
+
         # Notify the queue this "work item" has been processed
         channel_queue.task_done()
 
@@ -350,9 +357,6 @@ async def main():
 
     # Wait until all worker tasks are cancelled
     await asyncio.gather(*tasks, return_exceptions=True)
-
-    for channel in channels:
-        pprint(channel)
 
     logging.info("All Done! Good bye...")
 

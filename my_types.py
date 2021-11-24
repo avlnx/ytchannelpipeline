@@ -1,4 +1,4 @@
-from typing import Callable, Dict, TypeVar, List, Union, Any, Generic
+from typing import Callable, Dict, TypeVar, List, Union, Any, Generic, Optional
 from datetime import datetime
 import dateutil.parser
 import logging
@@ -47,10 +47,16 @@ class ApiResponseParser(Protocol[T]):
         ...
 
 
+PipelineFieldParsers = Dict[ApiResponseKind, ApiResponseParser]
+
+
 class PipelineField(Protocol[T]):
     # set both in __init__ to bind the T variable and initialize parsers
     result: T
-    parsers: Dict[ApiResponseKind, ApiResponseParser]
+    parsers: PipelineFieldParsers
+
+
+P = TypeVar("P", bound=PipelineField)
 
 
 def string_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
@@ -170,6 +176,9 @@ ChannelTitleResult = Result[str, str]
 
 
 class ChannelTitlePipelineField:
+    result: ChannelTitleResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: ChannelTitleResult = Err("Not loaded yet")
         self.parsers = {
@@ -183,6 +192,9 @@ DescriptionResult = Result[str, str]
 
 
 class ChannelDescriptionPipelineField:
+    result: DescriptionResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: DescriptionResult = Err("Not loaded yet")
         self.parsers = {
@@ -196,6 +208,9 @@ CountryResult = Result[str, str]
 
 
 class CountryPipelineField:
+    result: CountryResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: CountryResult = Err("Not loaded yet")
         self.parsers = {
@@ -209,6 +224,9 @@ PublishedAtResult = Result[datetime, str]
 
 
 class ChannelPublishedAtPipelineField:
+    result: PublishedAtResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: PublishedAtResult = Err("Not loaded yet")
         self.parsers = {
@@ -222,6 +240,9 @@ SubscriberCountResult = Result[int, str]
 
 
 class SubscriberCountPipelineField:
+    result: SubscriberCountResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: SubscriberCountResult = Err("Not loaded yet")
         self.parsers = {
@@ -235,6 +256,9 @@ ViewCountResult = Result[int, str]
 
 
 class ChannelViewCountPipelineField:
+    result: ViewCountResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: ViewCountResult = Err("Not loaded yet")
         self.parsers = {
@@ -250,6 +274,9 @@ UploadsPlaylistIdResult = Result[UploadsPlaylistId, str]
 
 
 class ChannelUploadsPlaylistIdPipelineField:
+    result: UploadsPlaylistIdResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: UploadsPlaylistIdResult = Err("Not loaded yet")
         self.parsers = {
@@ -272,6 +299,9 @@ NextPageTokenResult = Result[str, str]
 
 
 class ChannelPlaylistItemsNextPageTokenPipelineField:
+    result: NextPageTokenResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: NextPageTokenResult = Ok("")
         self.parsers = {
@@ -292,6 +322,9 @@ class ChannelVideoIdsToQueryPipelineField:
     Each call to /videos need to pop at most MAX_RESULTS (currently 50) out of this field for
     processing
     """
+
+    result: VideoIdsToQueryResult
+    parsers: PipelineFieldParsers
 
     def __init__(self):
         self.result: VideoIdsToQueryResult = Ok([])
@@ -333,12 +366,18 @@ VideoDescriptionResult = Result[str, str]
 
 
 class VideoIdPipelineField:
+    result: VideoIdResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: VideoIdResult = Err("Not set")
         self.parsers = {"youtube#video": string_parser_for_path(["data", "id"])}
 
 
 class VideoTitlePipelineField:
+    result: VideoTitleResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: VideoTitleResult = Err("Not parsed yet")
         self.parsers = {
@@ -347,6 +386,9 @@ class VideoTitlePipelineField:
 
 
 class VideoDescriptionPipelineField:
+    result: VideoDescriptionResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: VideoDescriptionResult = Err("Not parsed yet")
         self.parsers = {
@@ -370,6 +412,9 @@ VideosResult = Result[List[Video], str]
 
 
 class ChannelVideoListPipelineField:
+    result: VideosResult
+    parsers: PipelineFieldParsers
+
     def __init__(self):
         self.result: VideosResult = Ok([])
         self.parsers = {"internal#directAccumulator": direct_accumulator_parser()}
@@ -380,6 +425,9 @@ ChannelIdResult = Result[ChannelId, str]
 
 
 class ChannelIdPipelineField:
+    result: ChannelIdResult
+    parsers: PipelineFieldParsers
+
     def __init__(self, id_: ChannelId):
         self.result: ChannelIdResult = Ok(id_)
         self.parsers = {
@@ -438,3 +486,83 @@ class Represent(Generic[T]):
             info += f"  {field_name}={field.result.value}\n"
         info += "\n)"
         return info
+
+
+# Maps a key to a PipelineField this ReportField depends on
+ReportFieldDependencies = Dict[str, PipelineField]
+
+# A ReportFieldValue maps a column_name to a primitive value
+# Note that a field might generate more than one column
+ReportFieldValue = Dict[str, Union[str, int]]
+
+ReportRow = List[ReportFieldValue]
+
+ReportRowResult = Result[ReportRow, str]
+
+
+class ReportField(Protocol):
+    dependencies: ReportFieldDependencies
+
+    def values(self) -> ReportRow:
+        ...
+
+
+class ReportFieldProxy:
+    """
+    If all you need is to unwrap the value from a PipelineField you can reuse this class to make
+    a ReportField
+    """
+
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, field: PipelineField, column_name: Optional[str] = None):
+        self.dependencies = {"field": field}
+        self.column_name = column_name or field.__class__.__name__.replace(
+            "PipelineField", ""
+        )
+
+    def values(self) -> ReportRow:
+        return [{self.column_name: self.dependencies["field"].result.value}]
+
+
+class ChannelLinkReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_id: ChannelIdPipelineField):
+        self.dependencies = {"channel_id": channel_id}
+
+    def values(self) -> ReportRow:
+        return [
+            {
+                "ChannelLink": f"https://youtube.com/channel/"
+                f"{self.dependencies['channel_id'].result.value}"
+            }
+        ]
+
+
+class ReportRowFor:
+    def __init__(self, channel: Channel):
+        self.channel_id = ReportFieldProxy(channel.id_)
+        self.channel_title = ReportFieldProxy(channel.title)
+        self.channel_description = ReportFieldProxy(channel.description)
+        self.channel_link = ChannelLinkReportField(channel.id_)
+        self.country = ReportFieldProxy(channel.country)
+        self.subscriber_count = ReportFieldProxy(channel.subscriber_count)
+        self.published_at = ReportFieldProxy(
+            channel.published_at, column_name="JoinedDate"
+        )
+        self.view_count = ReportFieldProxy(
+            channel.view_count, column_name="TotalNumberOfViews"
+        )
+
+        # Build all ReportFields
+        self.values = self._build()
+
+    def _build(self) -> ReportRow:
+        values: ReportRow = []
+        for report_field in vars(self).values():
+            values += report_field.values()
+        return values
+
+    def __repr__(self) -> str:
+        return str(self.values)

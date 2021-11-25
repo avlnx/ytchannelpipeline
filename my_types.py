@@ -417,12 +417,29 @@ class VideoViewCountPipelineField:
         }
 
 
+VideoPublishedAtResult = Result[datetime, str]
+
+
+class VideoPublishedAtPipelineField:
+    result: VideoPublishedAtResult
+    parsers: PipelineFieldParsers
+
+    def __init__(self):
+        self.result: VideoPublishedAtResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": datetime_parser_for_path(
+                ["data", "snippet", "publishedAt"]
+            )
+        }
+
+
 class Video:
     def __init__(self):
         self.id_ = VideoIdPipelineField()
         self.title = VideoTitlePipelineField()
         self.description = VideoDescriptionPipelineField()
         self.view_count = VideoViewCountPipelineField()
+        self.published_at = VideoPublishedAtPipelineField()
 
     def __repr__(self):
         return Represent(self).as_string()
@@ -616,7 +633,7 @@ class Slice:
         ]
 
 
-class DescriptionOfTwoMostRecentVideosReportField:
+class DescriptionOfMostRecentVideosReportField:
     dependencies: ReportFieldDependencies
 
     def __init__(self, channel_videos: ChannelVideoListPipelineField):
@@ -632,7 +649,7 @@ class DescriptionOfTwoMostRecentVideosReportField:
         )
 
 
-class ViewCountForTenMostRecentVideosReportField:
+class ViewCountForMostRecentVideosReportField:
     dependencies: ReportFieldDependencies
 
     def __init__(self, channel_videos: ChannelVideoListPipelineField):
@@ -645,6 +662,22 @@ class ViewCountForTenMostRecentVideosReportField:
             Slice(this_many, videos)
             .and_unwrap_their("view_count")
             .as_column("VideoViewCount")
+        )
+
+
+class PublishedAtForMostRecentVideosReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        this_many = 5
+        videos = self.dependencies["channel_videos"].result
+        return (
+            Slice(this_many, videos)
+            .and_unwrap_their("published_at")
+            .as_column("PublishedAt")
         )
 
 
@@ -663,11 +696,14 @@ class ReportRowFor:
             channel.view_count, column_name="TotalNumberOfViews"
         )
         self.latest_video_link = LatestVideoLinkReportField(channel.videos)
-        self.description_of_latest_two_videos = (
-            DescriptionOfTwoMostRecentVideosReportField(channel.videos)
+        self.description_of_latest_videos = DescriptionOfMostRecentVideosReportField(
+            channel.videos
         )
-        self.view_count_of_latest_ten_videos = (
-            ViewCountForTenMostRecentVideosReportField(channel.videos)
+        self.view_count_of_latest_videos = ViewCountForMostRecentVideosReportField(
+            channel.videos
+        )
+        self.release_date_of_latest_videos = PublishedAtForMostRecentVideosReportField(
+            channel.videos
         )
 
         # Build all ReportFields

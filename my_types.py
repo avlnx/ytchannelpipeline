@@ -494,6 +494,9 @@ class Channel:
         return Represent(self).as_string()
 
 
+Resource = Union[Video, Channel]
+
+
 class Populate(Generic[T]):
     def __init__(self, item: T):
         self.item = item
@@ -599,13 +602,13 @@ class LatestVideoLinkReportField:
 
 class Slice:
     count: int
-    items: Result[List[Any]]
+    videos: VideosResult
     field_key: str
     values: List[AllowedReportFieldValue]
 
-    def __init__(self, count: int, items_result: Result[List[Any], str]):
+    def __init__(self, count: int, videos_result: VideosResult):
         self.count = count
-        self.items = items_result
+        self.videos = videos_result
         self.field_key = ""
         # Initialize to empty state (not found)
         self.values: List[AllowedReportFieldValue] = [
@@ -616,22 +619,52 @@ class Slice:
     def and_their(self, field_key: str) -> Slice:
         self.field_key = field_key
 
-        if isinstance(self.items, Err):
-            error_message = self.items.unwrap_err()
+        if isinstance(self.videos, Err):
+            error_message = self.videos.unwrap_err()
             # Fill with errors
             self.values = [error_message for _ in range(self.count)]
             # On error don't put into results
             self.valid_results = []
         else:
-            up_to_count_items = itertools.islice(iter(self.items.unwrap()), self.count)
-            for i, item in enumerate(up_to_count_items):
+            up_to_count_videos = itertools.islice(
+                iter(self.videos.unwrap()), self.count
+            )
+            for i, video in enumerate(up_to_count_videos):
                 # Replace as many empty states as possible
-                field = getattr(item, self.field_key)
+                field = getattr(video, self.field_key)
                 self.values[i] = field.result.value
                 # append the result if not err
                 if not isinstance(field.result, Err):
                     self.valid_results.append(field.result)
         return self
+
+    def released_between(
+        self,
+        start: datetime.datetime,
+        end: datetime.datetime = datetime.datetime.now(datetime.timezone.utc),
+        cap: int = 100,
+    ) -> List[Video]:
+        if isinstance(self.videos, Err):
+            return []
+        else:
+            videos = self.videos.unwrap()
+
+            videos_within_threshold: List[Video] = []
+
+            for video in reversed(videos):
+                if isinstance(video.published_at.result, Err):
+                    continue
+
+                published_at = video.published_at.result.unwrap()
+
+                if start < published_at < end:
+                    videos_within_threshold.append(video)
+
+                if published_at > end:
+                    # done
+                    break
+
+            return videos_within_threshold[::-1][:cap]
 
     def as_column(self, column_name: str) -> ReportRow:
         return [
@@ -692,68 +725,21 @@ class NumberOfVideosPublishedInSetPeriodsReportField:
 
     def values(self) -> ReportRow:
         this_many = 100
-        videos = self.dependencies["channel_videos"].result
 
-        # The dates below are sorted from most recent -> oldest and capped at `this_many`
-        published_at_date_results = (
-            Slice(this_many, videos).and_their("published_at").valid_results
-        )
+        videos = self.dependencies["channel_videos"].result
 
         now = datetime.datetime.now(datetime.timezone.utc)
 
-        # sorted from highest to lowest threshold DESC
-        periods = [
-            {
-                "threshold": now - datetime.timedelta(days=365),
-                "cap": 100,
-                "count": 0,
-                "column_name": "VideosPublishedInLast365Days",
-            },
-            {
-                "threshold": now - datetime.timedelta(days=30),
-                "cap": 20,
-                "count": 0,
-                "column_name": "VideosPublishedInLast30Days",
-            },
+        days_ago_365 = now - datetime.timedelta(days=365)
+        last_365_days = Slice(this_many, videos).released_between(days_ago_365, cap=100)
+
+        days_ago_90 = now - datetime.timedelta(days=90)
+        last_90_days = Slice(this_many, videos).released_between(days_ago_90, cap=20)
+
+        return [
+            {"VideosPublishedInLast365Days": len(last_365_days)},
+            {"VideosPublishedInLast90Days": len(last_90_days)},
         ]
-
-        videos_pulled = len(published_at_date_results)
-
-        videos_published_before_period = 0
-
-        period_index = 0
-
-        period = periods[period_index]
-
-        for published_at in reversed(published_at_date_results):
-            # start backwards until we find a video within the largest period, that is, the video's
-            # published_at is greater than period["threshold"].
-            # The count for any period is the total videos_pulled - videos_published_before_period
-            # If the video was published before the threshold: videos_published_before_period += 1
-            # Keep going for all periods. Note `periods` needs to be sorted by threshold DESC.
-            while published_at.unwrap() > period["threshold"]:
-                # traverse down all periods that this video satisfies
-                period["count"] = min(
-                    period["cap"], videos_pulled - videos_published_before_period
-                )
-                # move to next period
-                period_index += 1
-                try:
-                    period = periods[period_index]
-                except IndexError:
-                    # no more periods, we're done. Return a ReportRow
-                    return self.report_row_from_periods(periods)
-
-            # this video was published before the current period's threshold (and before the next
-            # period's too since they have thresholds in the future
-            videos_published_before_period += 1
-
-        # We checked all videos, return.
-        return self.report_row_from_periods(periods)
-
-    @staticmethod
-    def report_row_from_periods(periods) -> ReportRow:
-        return [{period["column_name"]: period["count"]} for period in periods]
 
 
 class ReportRowFor:
@@ -780,8 +766,8 @@ class ReportRowFor:
         self.release_date_of_latest_videos = PublishedAtForMostRecentVideosReportField(
             channel.videos
         )
-        self.videos_published_within_periods = (
-            NumberOfVideosPublishedInSetPeriodsReportField(channel.videos)
+        self.videos_published_within_periods = NumberOfVideosPublishedInSetPeriodsReportField(
+            channel.videos
         )
 
         # Build all ReportFields

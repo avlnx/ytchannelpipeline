@@ -5,6 +5,7 @@ import dateutil.parser
 import logging
 import itertools
 import statistics
+import parse
 
 from result import Result, Err, Ok
 from typing_extensions import NewType, Protocol, TypedDict, Literal
@@ -466,6 +467,49 @@ class VideoDislikeCountPipelineField:
         }
 
 
+VideoDurationResult = Result[datetime.timedelta, str]
+
+
+def youtube_duration(api_value: str) -> datetime.timedelta:
+    """
+    Parses strings like PT42M54S or PT3H57M46S or PT51M17S into a datetime.timedelta
+    :param api_value:
+    :return:
+    """
+    patterns = [
+        "PT{days:d}D{hours:d}H{minutes:d}M{seconds:d}S",
+        "PT{hours:d}H{minutes:d}M{seconds:d}S",
+        "PT{minutes:d}M{seconds:d}S",
+        "PT{seconds:d}S",
+    ]
+
+    result = None
+    for p in patterns:
+        # at least one pattern needs to succeed
+        result = parse.parse(p, api_value)
+        if result is not None:
+            break
+
+    if result is None:
+        raise ValueError(f"youtube_duration parser failed on value {api_value}.")
+
+    # <Result () {'hours': '3', 'minutes': '57', 'seconds': '46'}>
+    return datetime.timedelta(**result.named)
+
+
+class VideoDurationPipelineField:
+    result: VideoDurationResult
+    parsers: PipelineFieldParsers
+
+    def __init__(self):
+        self.result: VideoDurationResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": typing_parser_for_path(
+                ["data", "contentDetails", "duration"], youtube_duration
+            )
+        }
+
+
 class Video:
     def __init__(self):
         self.id_ = VideoIdPipelineField()
@@ -475,6 +519,7 @@ class Video:
         self.published_at = VideoPublishedAtPipelineField()
         self.like_count = VideoLikeCountPipelineField()
         self.dislike_count = VideoDislikeCountPipelineField()
+        self.duration = VideoDurationPipelineField()
 
     def __repr__(self):
         return Represent(self).as_string()
@@ -568,7 +613,7 @@ ReportFieldDependencies = Dict[str, PipelineField]
 
 # A ReportFieldValue maps a column_name to a primitive value
 # Note that a field might generate more than one column
-AllowedReportFieldValue = Union[str, int, datetime.datetime]
+AllowedReportFieldValue = Union[str, int, datetime.datetime, datetime.timedelta]
 ReportFieldValue = Dict[str, AllowedReportFieldValue]
 
 ReportRow = List[ReportFieldValue]
@@ -865,7 +910,7 @@ class MedianViewCountAndSubRatioForMostRecentVideosReportField:
         if isinstance(sub_count, Ok):
             row.append(
                 {
-                    f"SubscribersByMedianViewsRatioForLatest{this_many}Videos": round(
+                    f"SubscribersByMedianViewsRatioForLatestVideos": round(
                         sub_count.unwrap() / median
                     )
                 }
@@ -924,6 +969,28 @@ class LikeDislikeRatioForLatestVideosReportField:
         ]
 
 
+class AverageVideoDurationOfLatestVideosReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        this_many = 10
+        videos = self.dependencies["channel_videos"].result
+        duration_results = Slice(this_many, videos).and_their("duration").valid_results
+        durations = [d.unwrap() for d in duration_results]
+
+        return [
+            {
+                f"AverageVideoDurationOfLatestVideos": sum(
+                    durations, datetime.timedelta()
+                )
+                / len(durations)
+            }
+        ]
+
+
 class ReportRowFor:
     def __init__(self, channel: Channel):
         self.channel_id = ReportFieldProxy(channel.id_)
@@ -963,6 +1030,9 @@ class ReportRowFor:
         )
         self.like_dislike_ratio_for_latest_videos = (
             LikeDislikeRatioForLatestVideosReportField(channel.videos)
+        )
+        self.average_duration_for_latest_videos = (
+            AverageVideoDurationOfLatestVideosReportField(channel.videos)
         )
 
         # Build all ReportFields

@@ -4,6 +4,7 @@ import datetime
 import dateutil.parser
 import logging
 import itertools
+import statistics
 
 from result import Result, Err, Ok
 from typing_extensions import NewType, Protocol, TypedDict, Literal
@@ -240,7 +241,7 @@ class ChannelPublishedAtPipelineField:
 SubscriberCountResult = Result[int, str]
 
 
-class SubscriberCountPipelineField:
+class ChannelSubscriberCountPipelineField:
     result: SubscriberCountResult
     parsers: PipelineFieldParsers
 
@@ -481,7 +482,7 @@ class Channel:
         self.description = ChannelDescriptionPipelineField()
         self.country = CountryPipelineField()
         self.published_at = ChannelPublishedAtPipelineField()
-        self.subscriber_count = SubscriberCountPipelineField()
+        self.subscriber_count = ChannelSubscriberCountPipelineField()
         self.view_count = ChannelViewCountPipelineField()
         self.uploads_playlist_id = ChannelUploadsPlaylistIdPipelineField()
         self.playlist_items_next_page_token = (
@@ -742,6 +743,96 @@ class NumberOfVideosPublishedInSetPeriodsReportField:
         ]
 
 
+class MedianViewCountAndSubRatioForVideosWithinRangeReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(
+        self,
+        channel_videos: ChannelVideoListPipelineField,
+        channel_subscriber_count: ChannelSubscriberCountPipelineField,
+    ):
+        self.dependencies = {
+            "channel_videos": channel_videos,
+            "channel_subscriber_count": channel_subscriber_count,
+        }
+
+    def values(self) -> ReportRow:
+        this_many = 100
+
+        videos = self.dependencies["channel_videos"].result
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        days_ago_360 = now - datetime.timedelta(days=360)
+        days_ago_30 = now - datetime.timedelta(days=30)
+        videos_within_range = Slice(this_many, videos).released_between(
+            days_ago_360, days_ago_30
+        )
+
+        median = statistics.median(
+            [
+                v.view_count.result.unwrap()
+                for v in videos_within_range
+                if v.view_count.result.is_ok()
+            ]
+        )
+
+        row = [
+            {f"MedianViewsForVideosPublishedBetween360And30DaysAgo": median},
+        ]
+
+        sub_count = self.dependencies["channel_subscriber_count"].result
+        if isinstance(sub_count, Ok):
+            row.append(
+                {
+                    f"SubscribersByMedianViewsForVideosPublishedBetween360And30DaysAgo": round(
+                        sub_count.unwrap() / median
+                    )
+                }
+            )
+
+        return row
+
+
+class MedianViewCountAndSubRatioForMostRecentVideosReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(
+        self,
+        channel_videos: ChannelVideoListPipelineField,
+        channel_subscriber_count: ChannelSubscriberCountPipelineField,
+    ):
+        self.dependencies = {
+            "channel_videos": channel_videos,
+            "channel_subscriber_count": channel_subscriber_count,
+        }
+
+    def values(self) -> ReportRow:
+        this_many = 10
+
+        videos = self.dependencies["channel_videos"].result
+
+        view_counts = Slice(this_many, videos).and_their("view_count").values
+
+        median = statistics.median(view_counts)
+
+        row = [
+            {f"MedianViewsForLatest{this_many}Videos": median},
+        ]
+
+        sub_count = self.dependencies["channel_subscriber_count"].result
+        if isinstance(sub_count, Ok):
+            row.append(
+                {
+                    f"SubscribersByMedianViewsRatioForLatest{this_many}Videos": round(
+                        sub_count.unwrap() / median
+                    )
+                }
+            )
+
+        return row
+
+
 class ReportRowFor:
     def __init__(self, channel: Channel):
         self.channel_id = ReportFieldProxy(channel.id_)
@@ -766,8 +857,18 @@ class ReportRowFor:
         self.release_date_of_latest_videos = PublishedAtForMostRecentVideosReportField(
             channel.videos
         )
-        self.videos_published_within_periods = NumberOfVideosPublishedInSetPeriodsReportField(
-            channel.videos
+        self.videos_published_within_periods = (
+            NumberOfVideosPublishedInSetPeriodsReportField(channel.videos)
+        )
+        self.median_views_and_sub_ratio_within_360_and_30_days = (
+            MedianViewCountAndSubRatioForVideosWithinRangeReportField(
+                channel.videos, channel.subscriber_count
+            )
+        )
+        self.median_views_and_sub_ratio_of_latest_videos = (
+            MedianViewCountAndSubRatioForMostRecentVideosReportField(
+                channel.videos, channel.subscriber_count
+            )
         )
 
         # Build all ReportFields

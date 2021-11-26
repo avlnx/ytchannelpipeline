@@ -434,6 +434,38 @@ class VideoPublishedAtPipelineField:
         }
 
 
+VideoLikeCountResult = Result[int, str]
+
+
+class VideoLikeCountPipelineField:
+    result: VideoLikeCountResult
+    parsers: PipelineFieldParsers
+
+    def __init__(self):
+        self.result: VideoLikeCountResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": typing_parser_for_path(
+                ["data", "statistics", "likeCount"], int
+            )
+        }
+
+
+VideoDislikeCountResult = Result[int, str]
+
+
+class VideoDislikeCountPipelineField:
+    result: VideoDislikeCountResult
+    parsers: PipelineFieldParsers
+
+    def __init__(self):
+        self.result: VideoDislikeCountResult = Err("Not parsed yet")
+        self.parsers = {
+            "youtube#video": typing_parser_for_path(
+                ["data", "statistics", "dislikeCount"], int
+            )
+        }
+
+
 class Video:
     def __init__(self):
         self.id_ = VideoIdPipelineField()
@@ -441,6 +473,8 @@ class Video:
         self.description = VideoDescriptionPipelineField()
         self.view_count = VideoViewCountPipelineField()
         self.published_at = VideoPublishedAtPipelineField()
+        self.like_count = VideoLikeCountPipelineField()
+        self.dislike_count = VideoDislikeCountPipelineField()
 
     def __repr__(self):
         return Represent(self).as_string()
@@ -673,6 +707,13 @@ class Slice:
             for i, value in enumerate(self.values)
         ]
 
+    def as_valid_videos(self) -> List[Video]:
+        if isinstance(self.videos, Err):
+            logging.info(f"Could not parse videos {str(self.videos.unwrap_err())}")
+            return []
+
+        return self.videos.unwrap()[: self.count]
+
 
 class DescriptionOfMostRecentVideosReportField:
     dependencies: ReportFieldDependencies
@@ -833,6 +874,56 @@ class MedianViewCountAndSubRatioForMostRecentVideosReportField:
         return row
 
 
+class LikeDislikeRatioForLatestVideosReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(
+        self,
+        channel_videos: ChannelVideoListPipelineField,
+    ):
+        self.dependencies = {
+            "channel_videos": channel_videos,
+        }
+
+    def values(self) -> ReportRow:
+        this_many = 10
+
+        video_results = self.dependencies["channel_videos"].result
+
+        videos = Slice(this_many, video_results).as_valid_videos()
+
+        results: List[str] = ["Not found" for _ in range(this_many)]
+
+        result_index = 0
+
+        for video in videos:
+            like_count_result = video.like_count.result
+            dislike_count_result = video.dislike_count.result
+
+            # only calc if both numbers are available
+            if like_count_result.is_err():
+                results[result_index] = like_count_result.unwrap_err()
+                result_index += 1
+                continue
+
+            if dislike_count_result.is_err():
+                results[result_index] = dislike_count_result.unwrap_err()
+                result_index += 1
+                continue
+
+            likes = like_count_result.unwrap()
+            dislikes = dislike_count_result.unwrap()
+            ratio = round(likes / (likes + dislikes) * 100)
+            rounded_ratio = ratio - (ratio % 5)
+            results[result_index] = f"{rounded_ratio}% Likes"
+            result_index += 1
+
+        return [
+            {f"LikeDislikeRatioForLatestVideos-{i+1}/{this_many}": ratio}
+            for i, ratio in enumerate(results)
+        ]
+
+
 class ReportRowFor:
     def __init__(self, channel: Channel):
         self.channel_id = ReportFieldProxy(channel.id_)
@@ -869,6 +960,9 @@ class ReportRowFor:
             MedianViewCountAndSubRatioForMostRecentVideosReportField(
                 channel.videos, channel.subscriber_count
             )
+        )
+        self.like_dislike_ratio_for_latest_videos = (
+            LikeDislikeRatioForLatestVideosReportField(channel.videos)
         )
 
         # Build all ReportFields

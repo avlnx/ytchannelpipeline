@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Callable, Dict, TypeVar, List, Union, Any, Generic, Optional
-from datetime import datetime
+import datetime
 import dateutil.parser
 import logging
 import itertools
@@ -221,7 +221,7 @@ class CountryPipelineField:
         }
 
 
-PublishedAtResult = Result[datetime, str]
+PublishedAtResult = Result[datetime.datetime, str]
 
 
 class ChannelPublishedAtPipelineField:
@@ -417,7 +417,7 @@ class VideoViewCountPipelineField:
         }
 
 
-VideoPublishedAtResult = Result[datetime, str]
+VideoPublishedAtResult = Result[datetime.datetime, str]
 
 
 class VideoPublishedAtPipelineField:
@@ -530,7 +530,7 @@ ReportFieldDependencies = Dict[str, PipelineField]
 
 # A ReportFieldValue maps a column_name to a primitive value
 # Note that a field might generate more than one column
-AllowedReportFieldValue = Union[str, int, datetime]
+AllowedReportFieldValue = Union[str, int, datetime.datetime]
 ReportFieldValue = Dict[str, AllowedReportFieldValue]
 
 ReportRow = List[ReportFieldValue]
@@ -611,19 +611,26 @@ class Slice:
         self.values: List[AllowedReportFieldValue] = [
             "Not found" for _ in range(self.count)
         ]
+        self.valid_results: List[Result] = []
 
-    def and_unwrap_their(self, field_key: str) -> Slice:
+    def and_their(self, field_key: str) -> Slice:
         self.field_key = field_key
 
         if isinstance(self.items, Err):
             error_message = self.items.unwrap_err()
             # Fill with errors
             self.values = [error_message for _ in range(self.count)]
+            # On error don't put into results
+            self.valid_results = []
         else:
             up_to_count_items = itertools.islice(iter(self.items.unwrap()), self.count)
             for i, item in enumerate(up_to_count_items):
                 # Replace as many empty states as possible
-                self.values[i] = getattr(item, self.field_key).result.value
+                field = getattr(item, self.field_key)
+                self.values[i] = field.result.value
+                # append the result if not err
+                if not isinstance(field.result, Err):
+                    self.valid_results.append(field.result)
         return self
 
     def as_column(self, column_name: str) -> ReportRow:
@@ -644,7 +651,7 @@ class DescriptionOfMostRecentVideosReportField:
         videos = self.dependencies["channel_videos"].result
         return (
             Slice(this_many, videos)
-            .and_unwrap_their("description")
+            .and_their("description")
             .as_column("VideoDescription")
         )
 
@@ -659,9 +666,7 @@ class ViewCountForMostRecentVideosReportField:
         this_many = 10
         videos = self.dependencies["channel_videos"].result
         return (
-            Slice(this_many, videos)
-            .and_unwrap_their("view_count")
-            .as_column("VideoViewCount")
+            Slice(this_many, videos).and_their("view_count").as_column("VideoViewCount")
         )
 
 
@@ -675,10 +680,80 @@ class PublishedAtForMostRecentVideosReportField:
         this_many = 5
         videos = self.dependencies["channel_videos"].result
         return (
-            Slice(this_many, videos)
-            .and_unwrap_their("published_at")
-            .as_column("PublishedAt")
+            Slice(this_many, videos).and_their("published_at").as_column("PublishedAt")
         )
+
+
+class NumberOfVideosPublishedInSetPeriodsReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        this_many = 100
+        videos = self.dependencies["channel_videos"].result
+
+        # The dates below are sorted from most recent -> oldest and capped at `this_many`
+        published_at_date_results = (
+            Slice(this_many, videos).and_their("published_at").valid_results
+        )
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        # sorted from highest to lowest threshold DESC
+        periods = [
+            {
+                "threshold": now - datetime.timedelta(days=365),
+                "cap": 100,
+                "count": 0,
+                "column_name": "VideosPublishedInLast365Days",
+            },
+            {
+                "threshold": now - datetime.timedelta(days=30),
+                "cap": 20,
+                "count": 0,
+                "column_name": "VideosPublishedInLast30Days",
+            },
+        ]
+
+        videos_pulled = len(published_at_date_results)
+
+        videos_published_before_period = 0
+
+        period_index = 0
+
+        period = periods[period_index]
+
+        for published_at in reversed(published_at_date_results):
+            # start backwards until we find a video within the largest period, that is, the video's
+            # published_at is greater than period["threshold"].
+            # The count for any period is the total videos_pulled - videos_published_before_period
+            # If the video was published before the threshold: videos_published_before_period += 1
+            # Keep going for all periods. Note `periods` needs to be sorted by threshold DESC.
+            while published_at.unwrap() > period["threshold"]:
+                # traverse down all periods that this video satisfies
+                period["count"] = min(
+                    period["cap"], videos_pulled - videos_published_before_period
+                )
+                # move to next period
+                period_index += 1
+                try:
+                    period = periods[period_index]
+                except IndexError:
+                    # no more periods, we're done. Return a ReportRow
+                    return self.report_row_from_periods(periods)
+
+            # this video was published before the current period's threshold (and before the next
+            # period's too since they have thresholds in the future
+            videos_published_before_period += 1
+
+        # We checked all videos, return.
+        return self.report_row_from_periods(periods)
+
+    @staticmethod
+    def report_row_from_periods(periods) -> ReportRow:
+        return [{period["column_name"]: period["count"]} for period in periods]
 
 
 class ReportRowFor:
@@ -704,6 +779,9 @@ class ReportRowFor:
         )
         self.release_date_of_latest_videos = PublishedAtForMostRecentVideosReportField(
             channel.videos
+        )
+        self.videos_published_within_periods = (
+            NumberOfVideosPublishedInSetPeriodsReportField(channel.videos)
         )
 
         # Build all ReportFields

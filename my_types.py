@@ -991,6 +991,45 @@ class AverageVideoDurationOfLatestVideosReportField:
         ]
 
 
+class TopVideosByViewCountReportField:
+    dependencies: ReportFieldDependencies
+
+    def __init__(self, channel_videos: ChannelVideoListPipelineField):
+        self.dependencies = {"channel_videos": channel_videos}
+
+    def values(self) -> ReportRow:
+        this_many = 2
+
+        videos_result = self.dependencies["channel_videos"].result
+
+        if isinstance(videos_result, Err):
+            error_message = videos_result.unwrap_err()
+            return [
+                {f"TopVideosByViewCount-{i+1}/{this_many}": error_message}
+                for i in range(this_many)
+            ]
+
+        results = ["Not found" for _ in range(this_many)]
+
+        videos = videos_result.unwrap()
+        sorted_videos = sorted(
+            videos, key=lambda v: v.view_count.result.unwrap_or(0), reverse=True
+        )
+        video_slice = sorted_videos[:this_many]
+
+        # replace as many placeholder results as possible with a valid result
+        for index, video in enumerate(video_slice):
+            results[index] = (
+                f"({video.view_count.result.unwrap()}) {video.title.result.value}:"
+                f" https://youtube.com/video/{video.id_.result.value}"
+            )
+
+        return [
+            {f"TopVideosByViewCount-{i + 1}/{this_many}": result}
+            for i, result in enumerate(results)
+        ]
+
+
 class ReportRowFor:
     def __init__(self, channel: Channel):
         self.channel_id = ReportFieldProxy(channel.id_)
@@ -1034,6 +1073,7 @@ class ReportRowFor:
         self.average_duration_for_latest_videos = (
             AverageVideoDurationOfLatestVideosReportField(channel.videos)
         )
+        self.top_videos_by_view_count = TopVideosByViewCountReportField(channel.videos)
 
         # Build all ReportFields
         self.values = self._build()

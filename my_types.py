@@ -1093,5 +1093,12 @@ class ReportRowFor:
             values += report_field.values()
         return values
 
+    def as_dict(self) -> Dict:
+        d = {}
+        for report_field in self.values:
+            for key, value in report_field.items():
+                d[key] = value
+        return d
+
     def __repr__(self) -> str:
         return str(self.values)

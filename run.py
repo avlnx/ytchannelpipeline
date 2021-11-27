@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import random
-from pprint import pprint
+import csv
 from typing import List, TypeVar, Callable, Any
 from functools import wraps
 
@@ -240,14 +241,22 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
         tasks.append(task)
 
     while True:
-        # Get a ChannelId from the queue for processing
-        channel = await channel_queue.get()
+        # Get a Channel from the queue for processing
+        channel, output_file_semaphore = await channel_queue.get()
         logging.info(
             f"[{worker_name}]: Now processing channel {channel.id_.result.value}..."
         )
 
         # Process one Channel
         response: ApiResponseResult = await get(channel)
+
+        if isinstance(response, Err):
+            # request failed, move on
+            logging.error(
+                f"get/channel request failed with: \n{str(response.unwrap_err())}"
+            )
+            # Notify the queue this "work item" has been processed
+            channel_queue.task_done()
 
         Populate(channel).using(response)
 
@@ -301,11 +310,26 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
         # The channel instance has all the data needed, generate a ReportRow
         report_row = ReportRowFor(channel)
 
-        logging.info(f"\n\n* [{worker_name}]: ReportRow for {channel_title}:\n")
-        logging.info(f"\n{str(report_row)}\n\n")
+        # Write ReportRow to file
+        async with output_file_semaphore:
+            file_empty = os.stat(output_file_name).st_size == 0
+            with open(output_file_name, "a", newline="") as csv_file:
+                report_dict = report_row.as_dict()
+                fieldnames = list(report_dict.keys())
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+
+                # if file is empty also write the columns
+                if file_empty:
+                    writer.writeheader()
+
+                writer.writerow(report_dict)
+            logging.info(f"\n\n* [{worker_name}]: Wrote data for {channel_title}:\n")
 
         # Notify the queue this "work item" has been processed
         channel_queue.task_done()
+
+
+output_file_name = "results.csv"
 
 
 async def main():
@@ -335,10 +359,17 @@ async def main():
         Channel(id_=ChannelId("UC_x5XG1OV2P6uZZ5FSM9Ttw")),  # Google Developers
     ]
 
+    # touch output file
+    with open(output_file_name, "w+"):
+        pass
+
+    output_file_semaphore = asyncio.BoundedSemaphore(1)
+
     channel_queue = asyncio.Queue()
     for channel in channels:
-        # Put all channel_ids in the queue for processing
-        channel_queue.put_nowait(channel)
+        # Put all channels in the queue for processing along with a file semaphore so only one
+        # coroutine writes at a time to it
+        channel_queue.put_nowait((channel, output_file_semaphore))
 
     # Create some worker tasks to process the channel_queue concurrently
     tasks = []

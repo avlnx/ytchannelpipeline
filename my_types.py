@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import re
 from typing import Callable, Dict, TypeVar, List, Union, Any, Generic, Optional
 import datetime
 import dateutil.parser
@@ -397,9 +399,7 @@ class VideoDescriptionPipelineField:
     def __init__(self):
         self.result: VideoDescriptionResult = Err("Not parsed yet")
         self.parsers = {
-            "youtube#video": limited_size_string_parser_for_path(
-                ["data", "snippet", "description"]
-            )
+            "youtube#video": string_parser_for_path(["data", "snippet", "description"])
         }
 
 
@@ -760,7 +760,7 @@ class Slice:
         return self.videos.unwrap()[: self.count]
 
 
-class DescriptionOfMostRecentVideosReportField:
+class DescriptionAndParsedLinksOfMostRecentVideosReportField:
     dependencies: ReportFieldDependencies
 
     def __init__(self, channel_videos: ChannelVideoListPipelineField):
@@ -769,11 +769,20 @@ class DescriptionOfMostRecentVideosReportField:
     def values(self) -> ReportRow:
         this_many = 2
         videos = self.dependencies["channel_videos"].result
-        return (
-            Slice(this_many, videos)
-            .and_their("description")
-            .as_column("VideoDescription")
-        )
+        descriptions = Slice(this_many, videos).and_their("description").values
+        return [
+            {
+                f"VideoDescription-{i+1}/{this_many}": description,
+                f"VideoDescriptionLinks-{i+1}/{this_many}": self.parse_urls_from(
+                    description
+                ),
+            }
+            for i, description in enumerate(descriptions)
+        ]
+
+    @staticmethod
+    def parse_urls_from(description) -> List[str]:
+        return re.findall(r"(?P<url>https?://[^\s]+)", description)
 
 
 class ViewCountForMostRecentVideosReportField:
@@ -1045,8 +1054,8 @@ class ReportRowFor:
             channel.view_count, column_name="TotalNumberOfViews"
         )
         self.latest_video_link = LatestVideoLinkReportField(channel.videos)
-        self.description_of_latest_videos = DescriptionOfMostRecentVideosReportField(
-            channel.videos
+        self.description_of_latest_videos = (
+            DescriptionAndParsedLinksOfMostRecentVideosReportField(channel.videos)
         )
         self.view_count_of_latest_videos = ViewCountForMostRecentVideosReportField(
             channel.videos

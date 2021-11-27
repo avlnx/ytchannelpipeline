@@ -64,7 +64,7 @@ class PipelineField(Protocol[T]):
 P = TypeVar("P", bound=PipelineField)
 
 
-def string_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
+def parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
     def parser(current_result: T, data: ApiResponse) -> T:
         try:
             for field in path:
@@ -75,20 +75,6 @@ def string_parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
         return Ok(data)
 
     return parser
-
-
-def limited_size_string_parser_for_path(
-    path: List[DictPathKey], size: int = 30
-) -> ApiResponseParser:
-    string_parser = string_parser_for_path(path)
-
-    def limited_string_parser(current_result: T, data: ApiResponse) -> T:
-        raw_string_result = string_parser(current_result, data)
-        if isinstance(raw_string_result, Err):
-            return raw_string_result
-        return Ok(f"{raw_string_result.unwrap()[:size]}[...]")
-
-    return limited_string_parser
 
 
 def direct_accumulator_parser() -> ApiResponseParser:
@@ -102,7 +88,7 @@ def direct_accumulator_parser() -> ApiResponseParser:
 def typing_parser_for_path(
     path: List[DictPathKey], typer: TyperFunction
 ) -> ApiResponseParser:
-    dict_path_parser = string_parser_for_path(path)
+    dict_path_parser = parser_for_path(path)
 
     def typed_parser(current_result: T, data: ApiResponse) -> T:
         raw_string_result = dict_path_parser(current_result, data)
@@ -126,7 +112,7 @@ def typing_nested_dict_path_accumulator_parser(
     children_path: List[DictPathKey],
     children_typer: TyperFunction,
 ) -> ApiResponseParser:
-    dict_path_parser = string_parser_for_path(parent_path)
+    dict_path_parser = parser_for_path(parent_path)
 
     def nested_typed_parser(current_result: T, data: ApiResponse) -> T:
         parent_dict_result: T = Err("Could not parse parent")
@@ -187,7 +173,7 @@ class ChannelTitlePipelineField:
     def __init__(self):
         self.result: ChannelTitleResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": string_parser_for_path(
+            "youtube#channelListResponse": parser_for_path(
                 ["data", "items", 0, "brandingSettings", "channel", "title"]
             )
         }
@@ -203,7 +189,7 @@ class ChannelDescriptionPipelineField:
     def __init__(self):
         self.result: DescriptionResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": limited_size_string_parser_for_path(
+            "youtube#channelListResponse": parser_for_path(
                 ["data", "items", 0, "brandingSettings", "channel", "description"]
             )
         }
@@ -219,7 +205,7 @@ class CountryPipelineField:
     def __init__(self):
         self.result: CountryResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": string_parser_for_path(
+            "youtube#channelListResponse": parser_for_path(
                 ["data", "items", 0, "brandingSettings", "channel", "country"]
             )
         }
@@ -273,6 +259,22 @@ class ChannelViewCountPipelineField:
         }
 
 
+ChannelTopicCategoriesResult = Result[List[str], str]
+
+
+class ChannelTopicCategories:
+    result: ChannelTopicCategoriesResult
+    parsers: PipelineFieldParsers
+
+    def __init__(self):
+        self.result: ChannelTopicCategoriesResult = Err("Not loaded yet")
+        self.parsers = {
+            "youtube#channelListResponse": parser_for_path(
+                ["data", "items", 0, "topicDetails", "topicCategories"]
+            )
+        }
+
+
 UploadsPlaylistId = NewType("UploadsPlaylistId", str)
 
 UploadsPlaylistIdResult = Result[UploadsPlaylistId, str]
@@ -285,7 +287,7 @@ class ChannelUploadsPlaylistIdPipelineField:
     def __init__(self):
         self.result: UploadsPlaylistIdResult = Err("Not loaded yet")
         self.parsers = {
-            "youtube#channelListResponse": string_parser_for_path(
+            "youtube#channelListResponse": parser_for_path(
                 ["data", "items", 0, "contentDetails", "relatedPlaylists", "uploads"]
             )
         }
@@ -310,7 +312,7 @@ class ChannelPlaylistItemsNextPageTokenPipelineField:
     def __init__(self):
         self.result: NextPageTokenResult = Ok("")
         self.parsers = {
-            "youtube#playlistItemListResponse": string_parser_for_path(
+            "youtube#playlistItemListResponse": parser_for_path(
                 ["data", "nextPageToken"]
             )
         }
@@ -372,7 +374,7 @@ class VideoIdPipelineField:
 
     def __init__(self):
         self.result: VideoIdResult = Err("Not set")
-        self.parsers = {"youtube#video": string_parser_for_path(["data", "id"])}
+        self.parsers = {"youtube#video": parser_for_path(["data", "id"])}
 
 
 VideoTitleResult = Result[str, str]
@@ -384,9 +386,7 @@ class VideoTitlePipelineField:
 
     def __init__(self):
         self.result: VideoTitleResult = Err("Not parsed yet")
-        self.parsers = {
-            "youtube#video": string_parser_for_path(["data", "snippet", "title"])
-        }
+        self.parsers = {"youtube#video": parser_for_path(["data", "snippet", "title"])}
 
 
 VideoDescriptionResult = Result[str, str]
@@ -399,7 +399,7 @@ class VideoDescriptionPipelineField:
     def __init__(self):
         self.result: VideoDescriptionResult = Err("Not parsed yet")
         self.parsers = {
-            "youtube#video": string_parser_for_path(["data", "snippet", "description"])
+            "youtube#video": parser_for_path(["data", "snippet", "description"])
         }
 
 
@@ -548,9 +548,7 @@ class ChannelIdPipelineField:
     def __init__(self, id_: ChannelId):
         self.result: ChannelIdResult = Ok(id_)
         self.parsers = {
-            "youtube#channelListResponse": string_parser_for_path(
-                ["data", "items", 0, "id"]
-            )
+            "youtube#channelListResponse": parser_for_path(["data", "items", 0, "id"])
         }
 
 
@@ -559,6 +557,7 @@ class Channel:
         self.id_ = ChannelIdPipelineField(id_)
         self.title = ChannelTitlePipelineField()
         self.description = ChannelDescriptionPipelineField()
+        self.topic_categories = ChannelTopicCategories()
         self.country = CountryPipelineField()
         self.published_at = ChannelPublishedAtPipelineField()
         self.subscriber_count = ChannelSubscriberCountPipelineField()
@@ -1050,6 +1049,7 @@ class ReportRowFor:
         self.published_at = ReportFieldProxy(
             channel.published_at, column_name="JoinedDate"
         )
+        self.topic_categories = ReportFieldProxy(channel.topic_categories)
         self.view_count = ReportFieldProxy(
             channel.view_count, column_name="TotalNumberOfViews"
         )

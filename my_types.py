@@ -64,13 +64,17 @@ class PipelineField(Protocol[T]):
 P = TypeVar("P", bound=PipelineField)
 
 
-def parser_for_path(path: List[DictPathKey]) -> ApiResponseParser:
+def parser_for_path(
+    path: List[DictPathKey], custom_error: Optional[Err] = None
+) -> ApiResponseParser:
     def parser(current_result: T, data: ApiResponse) -> T:
         try:
             for field in path:
                 data = data[field]
-        except (KeyError, IndexError, ValueError) as err:
-            logging.error(f"Could not traverse path {path} in {data}: {str(err)}")
+        except (KeyError, IndexError, ValueError):
+            if custom_error is not None:
+                return custom_error
+            logging.error(f"Could not traverse path {path} in {data.keys()}")
             return current_result
         return Ok(data)
 
@@ -313,7 +317,7 @@ class ChannelPlaylistItemsNextPageTokenPipelineField:
         self.result: NextPageTokenResult = Ok("")
         self.parsers = {
             "youtube#playlistItemListResponse": parser_for_path(
-                ["data", "nextPageToken"]
+                ["data", "nextPageToken"], Err("Out of pages")
             )
         }
 

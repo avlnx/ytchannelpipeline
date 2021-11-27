@@ -1,6 +1,6 @@
 import logging
 
-DEBUG = True
+DEBUG = False
 
 LOGGING_LEVEL = logging.INFO if DEBUG else logging.WARNING
 
@@ -14,9 +14,9 @@ CHANNEL_WORKERS = 3
 VIDEO_WORKERS_PER_CHANNEL_WORKER = 2
 
 # How many videos we need per channel to fulfill our data needs
-VIDEOS_NEEDED_PER_CHANNEL = 6 if DEBUG else 100
+VIDEOS_NEEDED_PER_CHANNEL = 100
 
 # Max results returned by the youtube api calls. Currently 50
-MAX_RESULTS = 2 if DEBUG else 50
+MAX_RESULTS = 50
 
-SIMULATE_LATENCY = DEBUG
+SIMULATE_LATENCY = False

@@ -6,4 +6,4 @@ __pycache__
 settings.py
 
 # Ignore results files
-*.csv
+results.csv

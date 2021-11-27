@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import math
 import os
 import random
 import csv
+import time
 from typing import List, TypeVar, Callable, Any
 from functools import wraps
 
@@ -65,8 +67,8 @@ def build_youtube_client_getter(developer_key: str) -> YoutubeClientGetter:
     def make_client() -> YoutubeClientResult:
         nonlocal client
         if isinstance(client, Err):
-            print(f"\n\n{client.value}")
-            print("Now building youtube client...")
+            logging.debug(f"\n\n{client.value}")
+            logging.debug("Now building youtube client...")
             try:
                 c = googleapiclient.discovery.build(
                     api_service_name,
@@ -121,7 +123,9 @@ async def get(channel: Channel) -> ApiResult:
 
 
 @api_response
-async def get_next_playlist_items_for(channel: Channel) -> ApiResult:
+async def get_next_playlist_items_for(
+    channel: Channel, max_results: int = settings.MAX_RESULTS
+) -> ApiResult:
     uploads_playlist_id_result = channel.uploads_playlist_id.result
     if isinstance(uploads_playlist_id_result, Err):
         return Err(uploads_playlist_id_result.unwrap_err())
@@ -138,7 +142,7 @@ async def get_next_playlist_items_for(channel: Channel) -> ApiResult:
         .list(
             part="snippet,contentDetails,status,id",
             playlistId=uploads_playlist_id_result.unwrap(),
-            maxResults=settings.MAX_RESULTS,
+            maxResults=max_results,
             pageToken=channel.playlist_items_next_page_token.result.unwrap(),
         )
     )
@@ -267,19 +271,35 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
             settings.VIDEOS_NEEDED_PER_CHANNEL / settings.MAX_RESULTS
         )
 
+        videos_remaining = settings.VIDEOS_NEEDED_PER_CHANNEL
+
         for i in range(number_of_calls_needed):
             # get playlist items for this channel
-            # TODO: pass in remaining max_results instead of hard coding to max_results otherwise
-            #  if needed isn't a multiple of max_results we'll end up with more videos than needed
+            max_results = min(settings.MAX_RESULTS, videos_remaining)
+
             playlist_items_response: ApiResponseResult = (
-                await get_next_playlist_items_for(channel)
+                await get_next_playlist_items_for(channel, max_results)
             )
+
+            if isinstance(playlist_items_response, Err):
+                logging.error(
+                    f"[{worker_name}] Could not get playlistItems: "
+                    f"{str(playlist_items_response.unwrap_err())}"
+                )
+                break
+
             logging.info(
                 f"[{worker_name}]: Just got [{i + 1}/{number_of_calls_needed}] playlist items "
                 f"for {channel_title}..."
             )
 
             Populate(channel).using(playlist_items_response)
+
+            logging.info(
+                f"{channel_title}'s nextPageToken: {channel.playlist_items_next_page_token.result.value}"
+            )
+
+            videos_remaining -= max_results
 
         # channel.video_ids_to_query PipelineField now has all the VideoIds we need to pull
         # Add items to this channel_worker's video_queue. Note each item is a tuple of:
@@ -298,7 +318,7 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
 
         await video_queue.join()
 
-        logging.info(f"[{worker_name}]: Finished processing {channel_title}")
+        logging.info(f"[{worker_name}]: Finished building data for {channel_title}")
 
         # We're done, cancel the video worker tasks so they unlock
         for task in tasks:
@@ -323,7 +343,8 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
                     writer.writeheader()
 
                 writer.writerow(report_dict)
-            logging.info(f"\n\n* [{worker_name}]: Wrote data for {channel_title}:\n")
+            logging.info(f"[{worker_name}]: Finished writing data for {channel_title}")
+            print(f"Finished processing {channel_title}")
 
         # Notify the queue this "work item" has been processed
         channel_queue.task_done()
@@ -332,7 +353,22 @@ async def channel_worker(worker_name: str, channel_queue: asyncio.Queue) -> None
 output_file_name = "results.csv"
 
 
+input_file_name = "channel_ids.csv"
+
+
 async def main():
+    def check_channel_ids_input_file():
+        try:
+            with open(input_file_name, "r"):
+                pass
+        except FileNotFoundError:
+            print(
+                f"Could not find input file '{input_file_name}'."
+                f"Please create the file in the same directory as this program.\n"
+                f"It should contain one channel_id per line.\n"
+            )
+            exit(0)
+
     def check_youtube_client_configuration():
         client = build_youtube_client_getter(settings.DEVELOPER_KEY)
         if isinstance(client, Err):
@@ -346,18 +382,33 @@ async def main():
         logging.basicConfig(level=settings.LOGGING_LEVEL)
 
     def initialize():
+        check_channel_ids_input_file()
         check_youtube_client_configuration()
         set_logging_level()
         youtube()
 
     initialize()
 
-    # Hardcoded list of channels for now, will get ingested possibly from a csv file
-    channels: List[Channel] = [
-        Channel(id_=ChannelId("UC8butISFwT-Wl7EV0hUK0BQ")),  # Freecodecamp.org
-        Channel(id_=ChannelId("UCsUalyRg43M8D60mtHe6YcA")),  # Honeypot IO
-        Channel(id_=ChannelId("UC_x5XG1OV2P6uZZ5FSM9Ttw")),  # Google Developers
-    ]
+    start = time.time()
+
+    channels: List[Channel] = []
+
+    # Read in channel_ids from input file
+    with open(input_file_name, newline="") as input_file:
+        reader = csv.reader(input_file)
+        for channel_ids in reader:
+            try:
+                channels.append(Channel(id_=ChannelId(channel_ids[0])))
+            except IndexError:
+                logging.error(
+                    f"Could not read in row from {input_file_name}:\n{channel_ids}"
+                )
+                pass
+
+    print(
+        f"Processing {len(channels)} channels. We should take about "
+        f"{str(datetime.timedelta(seconds=3 * len(channels)))}...\n"
+    )
 
     # touch output file
     with open(output_file_name, "w+"):
@@ -389,7 +440,13 @@ async def main():
     # Wait until all worker tasks are cancelled
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    logging.info("All Done! Good bye...")
+    print(f"\nAll Done! Results were written to {output_file_name}.\n")
+
+    total_time = datetime.timedelta(seconds=time.time() - start)
+
+    print(
+        f"We took {str(total_time)}. An average of {str(total_time / len(channels))} per channel.\n"
+    )
 
 
 async def nap_before(action: str = "doing something") -> None:

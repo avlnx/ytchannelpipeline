@@ -3,7 +3,7 @@
 ### Open you terminal and clone this repo:
 You might need to [install git.](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git)
 
-`git clone git@github.com:brilliantorg/yt-channel-data-grabber.git`
+`git clone git@github.com:avlnx/ytchannelpipeline.git`
 
 ### Change into repo's directory
 
